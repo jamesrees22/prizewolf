@@ -27,14 +27,14 @@ alter table public.user_entries enable row level security;
 alter table public.user_digest_prefs enable row level security;
 
 -- Policies: users can only read/write their own records
-create policy if not exists "users can manage their own entries"
+create policy "users can manage their own entries"
   on public.user_entries
   for all
   to authenticated
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
-create policy if not exists "users can manage their own digest prefs"
+create policy "users can manage their own digest prefs"
   on public.user_digest_prefs
   for all
   to authenticated
