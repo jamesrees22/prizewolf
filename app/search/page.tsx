@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { useRouter } from 'next/navigation';
+import type { Session } from '@supabase/supabase-js';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -15,7 +16,7 @@ export default function SearchPage() {
 
   const handleSearch = async () => {
     setLoading(true);
-    const { data: { session } } = await supabase.auth.getSession();
+    const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
     if (!session) {
       router.push('/auth');
       return;
