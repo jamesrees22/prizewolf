@@ -27,7 +27,7 @@ type SiteCfg = {
   name: string;
   list_url: string;
   link_selector: string;
-  adapter_key: string; // 'revcomps' | 'generic' | future keys
+  adapter_key: string; // 'revcomps' | 'dcg' | 'generic' | future keys
   rate_limit_ms: number | null;
   tier: 'free' | 'premium' | 'both';
   enabled: boolean;
@@ -67,8 +67,7 @@ const computeRemaining = (total: number | null, sold: number | null): number | n
   return rem >= 0 ? rem : null;
 };
 
-// Smallest plausible ticket price (avoid cash-alternative/prize values)
-// Optional rules: price_patterns[], price_window {min,max}
+// Ticket price: pick the smallest plausible amount (avoid cash-alts/prize values)
 const extractTicketPrice = ($: CheerioAPI, rules?: any): number | null => {
   const text = $('body').text();
   const patterns: RegExp[] = (rules?.price_patterns ?? ['£\\s*([\\d.,]+)'])
@@ -89,7 +88,7 @@ const extractTicketPrice = ($: CheerioAPI, rules?: any): number | null => {
   return Math.min(...plausible);
 };
 
-// Generic totals extractor; can accept rule arrays for totals/sold
+// Generic totals extractor; accepts optional rule arrays
 const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
 
@@ -120,7 +119,7 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   return { total, sold };
 };
 
-// Rev Comps–specific totals extractor
+// Rev Comps — prefer explicit MAX + SOLD/REMAINING, then fallback
 const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
 
@@ -139,6 +138,32 @@ const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
   }
   return { total, sold };
 };
+
+// Dream Car Giveaways — prefer Remaining/Sold/Max entries; avoid stray numbers
+const extractTotalsDCG = ($: CheerioAPI) => {
+  const text = $('body').text();
+
+  const remaining = toInt(text.match(/\bremaining:\s*([\d,]+)\b/i)?.[1]) ?? null;
+  let sold =
+    toInt(text.match(/\b(?:tickets?|entries?)\s*sold\s*([\d,]+)\b/i)?.[1]) ??
+    toInt(text.match(/\bsold:\s*([\d,]+)\b/i)?.[1]) ??
+    null;
+
+  let total =
+    toInt(text.match(/\bmax(?:imum)?\s+(?:entries|tickets)\b[^\d]*([\d,]+)\b/i)?.[1]) ??
+    toInt(text.match(/\btotal\s+(?:entries|tickets)\b[^\d]*([\d,]+)\b/i)?.[1]) ??
+    null;
+
+  if (total == null) {
+    const m = text.match(/\b([\d,]+)\s*entries\b/i);
+    if (m?.[1]) total = toInt(m[1]);
+  }
+
+  if (total == null && sold != null && remaining != null) total = sold + remaining;
+  if (total != null && sold != null && sold > total) sold = null;
+
+  return { total, sold };
+};
 // -----------------------------
 
 // Build a site-specific parser based on adapter_key + rules
@@ -154,6 +179,9 @@ const buildParser = (adapterKey: string, rules?: any) => {
     switch (adapterKey) {
       case 'revcomps':
         totals = extractTotalsRevComps($, rules);
+        break;
+      case 'dcg':
+        totals = extractTotalsDCG($);
         break;
       case 'generic':
       default:
@@ -189,15 +217,14 @@ export async function POST(req: NextRequest) {
 
     const siteRows: SiteCfg[] =
       (sitesData ?? []).filter((s: SiteCfg) =>
-        userTier === 'both' ? true :
-        s.tier === 'both' || s.tier === userTier
+        userTier === 'both' ? true : (s.tier === 'both' || s.tier === userTier)
       );
 
     if (siteRows.length === 0) {
       return NextResponse.json([], { status: 200 });
     }
 
-    // Load adapter rules and map by key
+    // Load adapter rules (still used by 'generic' and fallbacks)
     const { data: rulesData, error: rulesErr } = await supabase
       .from('adapter_rules')
       .select('adapter_key,rules');
