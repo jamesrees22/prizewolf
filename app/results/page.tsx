@@ -8,7 +8,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Supabase environment variables are not configured. Check .env.local and GitHub secrets.');
+  throw new Error('Supabase environment variables are not configured. Check Codespaces secrets.');
 }
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
@@ -29,26 +29,32 @@ export default function ResultsPage() {
   const [results, setResults] = useState<Competition[]>([]);
   const [loading, setLoading] = useState(true);
   const searchParams = useSearchParams();
+  console.log('Results page loaded with query:', searchParams.get('query'));
   const query = searchParams.get('query') || '';
 
   useEffect(() => {
-    const fetchResults = async () => {
-      setLoading(true);
-      const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
-      const tier = session?.user?.user_metadata?.subscription_tier || 'free';
+  const fetchResults = async () => {
+    setLoading(true);
+    const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
+    const tier = session?.user?.user_metadata?.subscription_tier || 'free';
 
-      const { data } = await supabase
-        .from('competitions')
-        .select('*')
-        .ilike('prize', `%${query}%`)
-        .order('odds', { ascending: true })
-        .limit(tier === 'paid' ? 50 : 10);
+    const { data, error } = await supabase
+      .from('competitions')
+      .select('*')
+      .ilike('prize', `%${query}%`)
+      .order('odds', { ascending: true })
+      .limit(tier === 'paid' ? 50 : 10);
 
+    if (error) {
+      console.error('Supabase SELECT error:', error);
+      setResults([]);
+    } else {
       setResults(data || []);
-      setLoading(false);
-    };
-    fetchResults();
-  }, [query]);
+    }
+    setLoading(false);
+  };
+  fetchResults();
+}, [query]);
 
   return (
     <div className="min-h-screen bg-midnight-blue text-wolf-grey p-8">

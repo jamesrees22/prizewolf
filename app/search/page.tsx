@@ -23,8 +23,11 @@ export default function SearchPage() {
     setLoading(true);
     setError(null);
     try {
+      console.log('Redirecting to /results with query:', query);
       const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
+      console.log('Session data:', session); // Debug session
       if (!session) {
+        setError('No active session. Please log in.');
         router.push('/auth');
         return;
       }
@@ -49,9 +52,23 @@ export default function SearchPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query }),
         });
-        if (!res.ok) throw new Error('Scrape request failed');
-        const freshData = await res.json();
-        router.push(`/results?query=${encodeURIComponent(query)}`);
+        console.log('Scrape response status:', res.status, res.statusText);
+        const text = await res.text(); // Get raw response text first
+        console.log('Scrape response text:', text);
+        let freshData;
+        try {
+          freshData = text ? JSON.parse(text) : [];
+        } catch (parseError) {
+          console.error('Failed to parse JSON:', parseError);
+          setError('Invalid response from scrape server.');
+          setLoading(false);
+          return;
+        }
+        if (!res.ok || (Array.isArray(freshData) && freshData.length === 0)) {
+          setError('No competitions found after scraping. Try a different query.');
+        } else {
+          router.push(`/results?query=${encodeURIComponent(query)}`);
+        }
       } else {
         router.push(`/results?query=${encodeURIComponent(query)}`);
       }
