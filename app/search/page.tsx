@@ -4,16 +4,11 @@ import { createClient } from '@supabase/supabase-js';
 import { useRouter } from 'next/navigation';
 import type { Session } from '@supabase/supabase-js';
 
-console.log('Env vars:', {
-  NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-});
-
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Supabase environment variables are not configured. Check .env.local and GitHub secrets.');
+  throw new Error('Supabase environment variables are not configured. Check Codespaces secrets.');
 }
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
@@ -69,7 +64,7 @@ export default function SearchPage() {
 
   return (
     <div className="min-h-screen bg-midnight-blue text-wolf-grey flex flex-col items-center justify-center p-8">
-      <h1 className="text-4xl font-bold text-electric-gold mb-8">PrizeWolf</h1>
+      <img src="/logo.png" alt="PrizeWolf Logo" className="mb-8 w-48 h-auto" />
       {error && <p className="text-neon-red mb-4">{error}</p>}
       <input
         type="text"
