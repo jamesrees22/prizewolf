@@ -17,13 +17,24 @@ Use it as a living backlog. Update frequently!
 ## 🚧 Now (in progress / near term)
 - [ ] UI: Show **Remaining tickets** column in results table
 - [ ] Improve odds formatting (e.g. `1 in 3463` → `1 in 3,463`)
-- [ ] Add more site adapters (e.g. 7Days Performance, Elite Competitions)
+- [ ] Search also fires on **Enter key** (not just Search button)
+- [ ] Add **loading indicator** (spinner/progress bar) while searching/scraping
+- [ ] UI polish: enlarge logo, reduce spacing above search box
+- [ ] Results page: add **sort & filter** (odds ↑/↓, entry fee ↑/↓)
+- [ ] Add **favicon** (basic wolf icon until branded assets are ready)
 - [ ] Clean up error handling/logging in scraper route
+- [ ] Add more site adapters (e.g. 7Days Performance, Elite Competitions)
 
 ---
 
 ## ⏭ Next (planned)
-- [ ] User accounts: gate sites by **free vs premium tier**
+- [ ] **Scheduled full-site crawl** (daily job via Vercel Cron / Supabase Schedule)
+  - Stop scrape-on-search, always query DB
+  - Free users = daily refresh, Premium = multiple times/day
+- [ ] User accounts: gate sites/features by **free vs premium tier**
+- [ ] Dashboard page as post-login landing:
+  - New today, Lowest odds, Slow sellers, Ending soon
+- [ ] Add site header/nav with **Login/Logout**, Dashboard, Search, Profile
 - [ ] Add dark mode toggle / theme switcher in UI
 - [ ] Build `/api/debug-sites` for quick Supabase connectivity tests
 - [ ] Public roadmap page: show features + allow votes (powered by Supabase table)
@@ -31,6 +42,10 @@ Use it as a living backlog. Update frequently!
 ---
 
 ## 🌀 Later (nice-to-haves / stretch goals)
+- [ ] "Mark as entered" → save which comps a user has joined
+- [ ] Email digests:
+  - Free: weekly
+  - Premium: daily/customised (latest, lowest odds, by keyword)
 - [ ] Mobile app wrapper (React Native / Expo)
 - [ ] Browser extension for quick odds lookup
 - [ ] Notification system (email or push) when new comps match saved searches
