@@ -17,7 +17,7 @@ interface Competition {
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
-  odds: number | null; // in your DB this is "remaining"
+  odds: number | null; // DB stores remaining tickets here
   url: string;
   scraped_at: string | null;
 }
@@ -39,6 +39,9 @@ export default function ResultsPage() {
 
   const fmtMoney = (n: number | null | undefined) =>
     n == null ? 'N/A' : `£${n.toFixed(2)}`;
+
+  const fmtOdds = (n: number | null | undefined) =>
+    n == null ? 'N/A' : `1 in ${n.toLocaleString('en-GB')}`;
 
   useEffect(() => {
     const fetchResults = async () => {
@@ -126,7 +129,6 @@ export default function ResultsPage() {
     }
   };
 
-  // Derive rows for display (could compute remaining from odds if needed)
   const rows = useMemo(() => results, [results]);
 
   return (
@@ -147,6 +149,7 @@ export default function ResultsPage() {
             <tr className="bg-electric-gold text-midnight-blue">
               <th className="p-2 text-left">Prize</th>
               <th className="p-2 text-left">Site</th>
+              <th className="p-2 text-right">Odds</th>
               <th className="p-2 text-right">Remaining</th>
               <th className="p-2 text-right">Entry Fee</th>
               <th className="p-2 text-center">Link</th>
@@ -155,7 +158,7 @@ export default function ResultsPage() {
           </thead>
           <tbody>
             {rows.map((comp) => {
-              const remaining = comp.odds; // your DB stores remaining in 'odds'
+              const remaining = comp.odds;
               const isMarked = markedIds.has(comp.id);
               const isBusy = !!marking[comp.id];
 
@@ -163,6 +166,7 @@ export default function ResultsPage() {
                 <tr key={comp.id} className="border-b border-wolf-grey hover:bg-neon-red hover:text-white">
                   <td className="p-2">{comp.prize}</td>
                   <td className="p-2">{comp.site_name}</td>
+                  <td className="p-2 text-right">{fmtOdds(comp.odds)}</td>
                   <td className="p-2 text-right">{fmtInt(remaining)}</td>
                   <td className="p-2 text-right">{fmtMoney(comp.entry_fee ?? null)}</td>
                   <td className="p-2 text-center">
