@@ -4,7 +4,15 @@ import { createClient } from '@supabase/supabase-js';
 import { useSearchParams } from 'next/navigation';
 import type { Session } from '@supabase/supabase-js';
 
-// Define the competition interface based on the Supabase table
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error('Supabase environment variables are not configured. Check .env.local and GitHub secrets.');
+}
+
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
 interface Competition {
   id: string;
   prize: string;
@@ -17,13 +25,8 @@ interface Competition {
   scraped_at: string;
 }
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
 export default function ResultsPage() {
-  const [results, setResults] = useState<Competition[]>([]); // Explicitly type as Competition[]
+  const [results, setResults] = useState<Competition[]>([]);
   const [loading, setLoading] = useState(true);
   const searchParams = useSearchParams();
   const query = searchParams.get('query') || '';
@@ -41,7 +44,7 @@ export default function ResultsPage() {
         .order('odds', { ascending: true })
         .limit(tier === 'paid' ? 50 : 10);
 
-      setResults(data || []); // Now type-safe
+      setResults(data || []);
       setLoading(false);
     };
     fetchResults();
@@ -66,7 +69,7 @@ export default function ResultsPage() {
             </tr>
           </thead>
           <tbody>
-            {results.map((comp: Competition) => ( // Type the map parameter
+            {results.map((comp: Competition) => (
               <tr key={comp.id} className="border-b border-wolf-grey hover:bg-neon-red hover:text-white">
                 <td className="p-2">{comp.prize}</td>
                 <td className="p-2">{comp.site_name}</td>

@@ -2,20 +2,23 @@ import { NextRequest, NextResponse } from 'next/server';
 import { load } from 'cheerio';
 import { createClient } from '@supabase/supabase-js';
 
-// Define the competition interface with camelCase
-interface Competition {
-  prize: string;
-  site_name: string; // Keeping site_name as snake_case to match DB column
-  entryFee: number; // Changed from entry_fee
-  totalTickets: number; // Changed from total_tickets
-  ticketsSold: number; // Changed from tickets_sold
-  url: string;
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
+
+if (!supabaseUrl || !supabaseServiceKey) {
+  throw new Error('Supabase environment variables are not configured. Check .env.local and GitHub secrets.');
 }
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-);
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+interface Competition {
+  prize: string;
+  site_name: string;
+  entryFee: number;
+  totalTickets: number;
+  ticketsSold: number;
+  url: string;
+}
 
 const sites = [
   { name: 'Rev Comps', url: 'https://revcomps.com/competitions', selector: '.comp-item' },
@@ -47,15 +50,14 @@ export async function POST(req: NextRequest) {
         comps.push({
           prize,
           site_name: site.name,
-          entryFee, // Updated to match interface
-          totalTickets, // Updated to match interface
-          ticketsSold, // Updated to match interface
+          entryFee,
+          totalTickets,
+          ticketsSold,
           url: new URL(url, site.url).href,
         });
       });
 
-      // Rate limit: 2s delay
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 2000)); // Rate limit
     } catch (error) {
       console.error(`Scrape failed for ${site.name}:`, error);
     }
