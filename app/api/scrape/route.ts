@@ -1,17 +1,15 @@
 // app/api/scrape/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { load } from 'cheerio';
+import { load, type CheerioAPI } from 'cheerio';
 import { createClient } from '@supabase/supabase-js';
 
 export const runtime = 'nodejs';
 
-// Service-role client (server-only). Make sure these envs are set in Codespaces/Vercel.
 const supabase = createClient(
   process.env.SUPABASE_URL as string,
   process.env.SUPABASE_SERVICE_KEY as string
 );
 
-// Matches the columns used by your UI (results/search pages)
 type Row = {
   prize: string;
   site_name: string;
@@ -19,7 +17,7 @@ type Row = {
   total_tickets: number | null;
   tickets_sold: number | null;
   url: string;
-  scraped_at?: string; // default now()
+  scraped_at?: string;
 };
 
 const UA =
@@ -34,8 +32,8 @@ const fetchHtml = async (url: string): Promise<string> => {
   return res.text();
 };
 
-// Helpers
-const toNumber = (s?: string | null): number | null => {
+// ---------- helpers ----------
+const toFloat = (s?: string | null): number | null => {
   if (!s) return null;
   const n = parseFloat(s.replace(/[^\d.]/g, ''));
   return Number.isFinite(n) ? n : null;
@@ -45,19 +43,41 @@ const toInt = (s?: string | null): number | null => {
   const n = parseInt(s.replace(/[^\d]/g, ''), 10);
   return Number.isFinite(n) ? n : null;
 };
-const computeOdds = (total: number | null, sold: number | null): number | null => {
-  if (total == null) return null;
-  const remaining = sold == null ? total : Math.max(total - sold, 0);
-  return remaining > 0 ? remaining : null; // "1 in remaining"
+
+// Smallest plausible ticket price (avoid cash-alternative/prize values)
+const extractTicketPrice = ($: CheerioAPI): number | null => {
+  const text = $('body').text(); // or $.root().text()
+  const poundMatches = Array.from(text.matchAll(/£\s*([\d.,]+)/g))
+    .map((m) => toFloat(m[1]))
+    .filter((n): n is number => n != null);
+
+  const plausible = poundMatches.filter((v) => v >= 0.1 && v <= 50);
+  if (plausible.length === 0) return null;
+  return Math.min(...plausible);
 };
 
-// Site adapters
-const sites: Array<{
-  name: string;
-  listUrl: string;
-  linkSelector: string;
-  parseDetail: (html: string, url: string) => Row | null;
-}> = [
+const extractTotals = ($: CheerioAPI) => {
+  const text = $('body').text();
+
+  // total tickets
+  let total =
+    toInt(text.match(/Number of Tickets\s*([\d,]+)/i)?.[1]) ??
+    toInt(text.match(/max of\s*([\d,]+)\s*tickets/i)?.[1]) ??
+    toInt(text.match(/([\d,]+)\s*entries/i)?.[1]) ??
+    null;
+
+  // tickets sold
+  let sold =
+    toInt(text.match(/Tickets?\s*sold\s*([\d,]+)/i)?.[1]) ??
+    toInt(text.match(/Sold:\s*([\d,]+)/i)?.[1]) ??
+    null;
+
+  if (total != null && sold != null && sold > total) sold = null;
+  return { total, sold };
+};
+// -----------------------------
+
+const sites = [
   {
     name: 'Rev Comps',
     listUrl: 'https://www.revcomps.com/current-competitions/',
@@ -67,21 +87,15 @@ const sites: Array<{
       const prize = $('h1, h2').first().text().trim();
       if (!prize) return null;
 
-      // Heuristics from visible page text
-      const text = $.text();
-      const price = toNumber(text.match(/£\s*([\d.,]+)/)?.[1]);
-      const sold = toInt(text.match(/SOLD:\s*([\d,]+)/i)?.[1]);
-      const total =
-        toInt(text.match(/Number of Tickets\s*([\d,]+)/i)?.[1]) ??
-        toInt(text.match(/max of\s*([\d,]+)\s*tickets/i)?.[1]) ??
-        null;
+      const entry_fee = extractTicketPrice($);
+      const { total: total_tickets, sold: tickets_sold } = extractTotals($);
 
       return {
         prize,
         site_name: 'Rev Comps',
-        entry_fee: price,
-        total_tickets: total,
-        tickets_sold: sold,
+        entry_fee,
+        total_tickets,
+        tickets_sold,
         url,
       };
     },
@@ -95,17 +109,15 @@ const sites: Array<{
       const prize = $('h1, h2').first().text().trim();
       if (!prize) return null;
 
-      const text = $.text();
-      const price = toNumber(text.match(/£\s*([\d.,]+)/)?.[1]);
-      const total = toInt(text.match(/([\d,]+)\s*entries/i)?.[1]);
-      const sold = toInt(text.match(/Tickets sold\s*([\d,]+)/i)?.[1]);
+      const entry_fee = extractTicketPrice($);
+      const { total: total_tickets, sold: tickets_sold } = extractTotals($);
 
       return {
         prize,
         site_name: 'Dream Car Giveaways',
-        entry_fee: price,
-        total_tickets: total,
-        tickets_sold: sold,
+        entry_fee,
+        total_tickets,
+        tickets_sold,
         url,
       };
     },
@@ -123,7 +135,6 @@ export async function POST(req: NextRequest) {
         const listHtml = await fetchHtml(site.listUrl);
         const $ = load(listHtml);
 
-        // Collect unique absolute links
         const links = Array.from(
           new Set(
             $(site.linkSelector)
@@ -143,17 +154,11 @@ export async function POST(req: NextRequest) {
             const parsed = site.parseDetail(detailHtml, url);
             if (!parsed) continue;
 
-            // Client-side filter by query if present
             if (query && !parsed.prize.toLowerCase().includes(String(query).toLowerCase())) {
               continue;
             }
 
-            rows.push({
-              ...parsed,
-              scraped_at: new Date().toISOString(),
-            });
-
-            // Be polite to hosts
+            rows.push({ ...parsed, scraped_at: new Date().toISOString() });
             await new Promise((r) => setTimeout(r, 250));
           } catch (e) {
             console.warn(`Detail parse failed for ${site.name}: ${url}`, e);
@@ -165,7 +170,6 @@ export async function POST(req: NextRequest) {
     }
 
     if (rows.length) {
-      // Upsert by URL (requires a UNIQUE(url) constraint for best effect)
       const { error } = await supabase
         .from('competitions')
         .upsert(rows, { onConflict: 'url', ignoreDuplicates: false })
