@@ -20,9 +20,22 @@ type Row = {
   scraped_at?: string;
 };
 
-// What we return to the client (enriched, not stored)
-type ApiRow = Row & {
-  remaining_tickets: number | null;
+type ApiRow = Row & { remaining_tickets: number | null };
+
+// Config records from DB
+type SiteCfg = {
+  name: string;
+  list_url: string;
+  link_selector: string;
+  adapter_key: string; // 'revcomps' | 'generic' | future keys
+  rate_limit_ms: number | null;
+  tier: 'free' | 'premium' | 'both';
+  enabled: boolean;
+};
+
+type AdapterRules = {
+  adapter_key: string;
+  rules: any; // JSON rules structure (see seed)
 };
 
 const UA =
@@ -55,34 +68,60 @@ const computeRemaining = (total: number | null, sold: number | null): number | n
 };
 
 // Smallest plausible ticket price (avoid cash-alternative/prize values)
-const extractTicketPrice = ($: CheerioAPI): number | null => {
+// Optional rules: price_patterns[], price_window {min,max}
+const extractTicketPrice = ($: CheerioAPI, rules?: any): number | null => {
   const text = $('body').text();
-  const poundMatches = Array.from(text.matchAll(/£\s*([\d.,]+)/g))
-    .map((m) => toFloat(m[1]))
-    .filter((n): n is number => n != null);
-  const plausible = poundMatches.filter((v) => v >= 0.1 && v <= 50);
+  const patterns: RegExp[] = (rules?.price_patterns ?? ['£\\s*([\\d.,]+)'])
+    .map((p: string) => new RegExp(p, 'g'));
+
+  const nums: number[] = [];
+  for (const rx of patterns) {
+    for (const m of text.matchAll(rx)) {
+      const v = toFloat((m as any)[1]);
+      if (v != null) nums.push(v);
+    }
+  }
+
+  const min = rules?.price_window?.min ?? 0.1;
+  const max = rules?.price_window?.max ?? 50;
+  const plausible = nums.filter((v) => v >= min && v <= max);
   if (plausible.length === 0) return null;
   return Math.min(...plausible);
 };
 
-const extractTotalsGeneric = ($: CheerioAPI) => {
+// Generic totals extractor; can accept rule arrays for totals/sold
+const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
-  let total =
-    toInt(text.match(/Number of Tickets\s*([\d,]+)/i)?.[1]) ??
-    toInt(text.match(/max of\s*([\d,]+)\s*tickets/i)?.[1]) ??
-    toInt(text.match(/([\d,]+)\s*entries/i)?.[1]) ??
-    null;
 
-  let sold =
-    toInt(text.match(/Tickets?\s*sold\s*([\d,]+)/i)?.[1]) ??
-    toInt(text.match(/Sold:\s*([\d,]+)/i)?.[1]) ??
-    null;
+  const totalPatterns: RegExp[] = (rules?.total_patterns ?? [
+    'Number of Tickets\\s*([\\d,]+)',
+    'max of\\s*([\\d,]+)\\s*tickets',
+    '([\\d,]+)\\s*entries',
+  ]).map((p: string) => new RegExp(p, 'i'));
+
+  const soldPatterns: RegExp[] = (rules?.sold_patterns ?? [
+    'Tickets?\\s*sold\\s*([\\d,]+)',
+    'Sold:\\s*([\\d,]+)',
+  ]).map((p: string) => new RegExp(p, 'i'));
+
+  let total: number | null = null;
+  for (const rx of totalPatterns) {
+    const m = text.match(rx);
+    if (m?.[1]) { total = toInt(m[1]); break; }
+  }
+
+  let sold: number | null = null;
+  for (const rx of soldPatterns) {
+    const m = text.match(rx);
+    if (m?.[1]) { sold = toInt(m[1]); break; }
+  }
 
   if (total != null && sold != null && sold > total) sold = null;
   return { total, sold };
 };
 
-const extractTotalsRevComps = ($: CheerioAPI) => {
+// Rev Comps–specific totals extractor
+const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
 
   const maxPhrase = toInt(text.match(/\bPRIZE HAS A MAX OF\s*([\d,]+)\s*TICKETS\b/i)?.[1]);
@@ -94,7 +133,7 @@ const extractTotalsRevComps = ($: CheerioAPI) => {
   if (total != null && sold != null && sold > total) sold = null;
 
   if (total == null) {
-    const g = extractTotalsGeneric($);
+    const g = extractTotalsGeneric($, rules?.fallback);
     total = g.total;
     if (sold == null) sold = g.sold;
   }
@@ -102,74 +141,92 @@ const extractTotalsRevComps = ($: CheerioAPI) => {
 };
 // -----------------------------
 
-const sites = [
-  {
-    name: 'Rev Comps',
-    listUrl: 'https://www.revcomps.com/current-competitions/',
-    linkSelector: 'a[href*="/product/"]',
-    parseDetail: (html: string, url: string): Row | null => {
-      const $ = load(html);
-      const prize = $('h1, h2').first().text().trim();
-      if (!prize) return null;
+// Build a site-specific parser based on adapter_key + rules
+const buildParser = (adapterKey: string, rules?: any) => {
+  return (html: string, url: string, siteName: string): Row | null => {
+    const $ = load(html);
+    const prize = $('h1, h2').first().text().trim();
+    if (!prize) return null;
 
-      const entry_fee = extractTicketPrice($);
-      const { total, sold } = extractTotalsRevComps($);
+    const entry_fee = extractTicketPrice($, rules);
 
-      return {
-        prize,
-        site_name: 'Rev Comps',
-        entry_fee,
-        total_tickets: total,
-        tickets_sold: sold,
-        url,
-      };
-    },
-  },
-  {
-    name: 'Dream Car Giveaways',
-    listUrl: 'https://dreamcargiveaways.co.uk/competitions',
-    linkSelector: 'a[href*="/competitions/"]',
-    parseDetail: (html: string, url: string): Row | null => {
-      const $ = load(html);
-      const prize = $('h1, h2').first().text().trim();
-      if (!prize) return null;
+    let totals: { total: number | null; sold: number | null };
+    switch (adapterKey) {
+      case 'revcomps':
+        totals = extractTotalsRevComps($, rules);
+        break;
+      case 'generic':
+      default:
+        totals = extractTotalsGeneric($, rules);
+        break;
+    }
 
-      const entry_fee = extractTicketPrice($);
-      const { total, sold } = extractTotalsGeneric($);
-
-      return {
-        prize,
-        site_name: 'Dream Car Giveaways',
-        entry_fee,
-        total_tickets: total,
-        tickets_sold: sold,
-        url,
-      };
-    },
-  },
-];
+    return {
+      prize,
+      site_name: siteName,
+      entry_fee,
+      total_tickets: totals.total,
+      tickets_sold: totals.sold,
+      url,
+    };
+  };
+};
 
 export async function POST(req: NextRequest) {
   try {
-    const { query } = await req.json().catch(() => ({ query: '' as string }));
+    // request body: { query?: string, tier?: 'free'|'premium'|'both' }
+    const body = await req.json().catch(() => ({} as any));
+    const query: string = String(body?.query ?? '');
+    const userTier: 'free' | 'premium' | 'both' = (body?.tier ?? 'both');
+
+    // Load enabled sites (respect tier)
+    const { data: sitesData, error: sitesErr } = await supabase
+      .from('sites')
+      .select('name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled')
+      .eq('enabled', true);
+
+    if (sitesErr) throw sitesErr;
+
+    const siteRows: SiteCfg[] =
+      (sitesData ?? []).filter((s: SiteCfg) =>
+        userTier === 'both' ? true :
+        s.tier === 'both' || s.tier === userTier
+      );
+
+    if (siteRows.length === 0) {
+      return NextResponse.json([], { status: 200 });
+    }
+
+    // Load adapter rules and map by key
+    const { data: rulesData, error: rulesErr } = await supabase
+      .from('adapter_rules')
+      .select('adapter_key,rules');
+
+    if (rulesErr) throw rulesErr;
+
+    const rulesMap = new Map<string, any>();
+    (rulesData ?? []).forEach((r: AdapterRules) => rulesMap.set(r.adapter_key, r.rules));
+
     const upsertRows: Row[] = [];
     const apiRows: ApiRow[] = [];
     const seen = new Set<string>();
 
-    for (const site of sites) {
+    for (const site of siteRows) {
       try {
-        const listHtml = await fetchHtml(site.listUrl);
+        const listHtml = await fetchHtml(site.list_url);
         const $ = load(listHtml);
 
         const links = Array.from(
           new Set(
-            $(site.linkSelector)
+            $(site.link_selector)
               .map((_, a) => $(a).attr('href'))
               .get()
               .filter(Boolean)
-              .map((href) => new URL(href!, site.listUrl).href)
+              .map((href) => new URL(href!, site.list_url).href)
           )
         ).slice(0, 60);
+
+        const parseDetail = buildParser(site.adapter_key, rulesMap.get(site.adapter_key));
 
         for (const url of links) {
           if (seen.has(url)) continue;
@@ -177,10 +234,10 @@ export async function POST(req: NextRequest) {
 
           try {
             const detailHtml = await fetchHtml(url);
-            const parsed = site.parseDetail(detailHtml, url);
+            const parsed = parseDetail(detailHtml, url, site.name);
             if (!parsed) continue;
 
-            if (query && !parsed.prize.toLowerCase().includes(String(query).toLowerCase())) {
+            if (query && !parsed.prize.toLowerCase().includes(query.toLowerCase())) {
               continue;
             }
 
@@ -193,7 +250,8 @@ export async function POST(req: NextRequest) {
             const apiRow: ApiRow = { ...row, remaining_tickets };
             apiRows.push(apiRow);
 
-            await new Promise((r) => setTimeout(r, 250));
+            const pause = site.rate_limit_ms ?? 250;
+            await new Promise((r) => setTimeout(r, pause));
           } catch (e) {
             console.warn(`Detail parse failed for ${site.name}: ${url}`, e);
           }
