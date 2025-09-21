@@ -2,6 +2,20 @@
 import { useEffect, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { useSearchParams } from 'next/navigation';
+import type { Session } from '@supabase/supabase-js';
+
+// Define the competition interface based on the Supabase table
+interface Competition {
+  id: string;
+  prize: string;
+  site_name: string;
+  entry_fee: number | null;
+  total_tickets: number;
+  tickets_sold: number;
+  odds: number | null;
+  url: string;
+  scraped_at: string;
+}
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -9,7 +23,7 @@ const supabase = createClient(
 );
 
 export default function ResultsPage() {
-  const [results, setResults] = useState([]);
+  const [results, setResults] = useState<Competition[]>([]); // Explicitly type as Competition[]
   const [loading, setLoading] = useState(true);
   const searchParams = useSearchParams();
   const query = searchParams.get('query') || '';
@@ -17,7 +31,7 @@ export default function ResultsPage() {
   useEffect(() => {
     const fetchResults = async () => {
       setLoading(true);
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
       const tier = session?.user?.user_metadata?.subscription_tier || 'free';
 
       const { data } = await supabase
@@ -27,7 +41,7 @@ export default function ResultsPage() {
         .order('odds', { ascending: true })
         .limit(tier === 'paid' ? 50 : 10);
 
-      setResults(data || []);
+      setResults(data || []); // Now type-safe
       setLoading(false);
     };
     fetchResults();
@@ -52,12 +66,12 @@ export default function ResultsPage() {
             </tr>
           </thead>
           <tbody>
-            {results.map((comp: any) => (
+            {results.map((comp: Competition) => ( // Type the map parameter
               <tr key={comp.id} className="border-b border-wolf-grey hover:bg-neon-red hover:text-white">
                 <td className="p-2">{comp.prize}</td>
                 <td className="p-2">{comp.site_name}</td>
                 <td className="p-2">{comp.odds?.toFixed(0) || 'N/A'}</td>
-                <td className="p-2">£{comp.entry_fee}</td>
+                <td className="p-2">£{comp.entry_fee || 0}</td>
                 <td className="p-2">
                   <a href={comp.url} target="_blank" className="underline">Enter</a>
                 </td>

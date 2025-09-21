@@ -2,6 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { load } from 'cheerio';
 import { createClient } from '@supabase/supabase-js';
 
+// Define the competition interface with camelCase
+interface Competition {
+  prize: string;
+  site_name: string; // Keeping site_name as snake_case to match DB column
+  entryFee: number; // Changed from entry_fee
+  totalTickets: number; // Changed from total_tickets
+  ticketsSold: number; // Changed from tickets_sold
+  url: string;
+}
+
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_KEY!
@@ -17,7 +27,7 @@ const sites = [
 
 export async function POST(req: NextRequest) {
   const { query } = await req.json();
-  const comps: any[] = [];
+  const comps: Competition[] = [];
 
   for (const site of sites) {
     try {
@@ -31,15 +41,15 @@ export async function POST(req: NextRequest) {
 
         const entryFee = parseFloat($(el).find('.entry-price, .price').text().replace(/[^0-9.]/g, '')) || 0;
         const totalTickets = parseInt($(el).find('.total-tickets, .ticket-count').text().replace(/[^0-9]/g, '')) || 1000000;
-        const soldTickets = parseInt($(el).find('.sold, .tickets-sold').text().replace(/[^0-9]/g, '')) || 0;
+        const ticketsSold = parseInt($(el).find('.sold, .tickets-sold').text().replace(/[^0-9]/g, '')) || 0;
         const url = $(el).find('a').attr('href') || site.url;
 
         comps.push({
           prize,
           site_name: site.name,
-          entry_fee: entryFee,
-          total_tickets: totalTickets,
-          tickets_sold: soldTickets,
+          entryFee, // Updated to match interface
+          totalTickets, // Updated to match interface
+          ticketsSold, // Updated to match interface
           url: new URL(url, site.url).href,
         });
       });
@@ -52,7 +62,9 @@ export async function POST(req: NextRequest) {
   }
 
   if (comps.length > 0) {
-    const { error } = await supabase.from('competitions').upsert(comps, { onConflict: ['prize', 'site_name'] });
+    const { error } = await supabase
+      .from('competitions')
+      .upsert(comps, { onConflict: 'prize,site_name' });
     if (error) {
       console.error(error);
       return NextResponse.json({ error: 'Failed to save data' }, { status: 500 });
