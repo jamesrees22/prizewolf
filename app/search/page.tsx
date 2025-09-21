@@ -23,9 +23,7 @@ export default function SearchPage() {
     setLoading(true);
     setError(null);
     try {
-      console.log('Redirecting to /results with query:', query);
       const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
-      console.log('Session data:', session); // Debug session
       if (!session) {
         setError('No active session. Please log in.');
         router.push('/auth');
@@ -42,36 +40,30 @@ export default function SearchPage() {
 
       if (queryError) {
         setError(queryError.message);
-        setLoading(false);
         return;
       }
 
-      if (data?.length === 0) {
+      if (!data || data.length === 0) {
         const res = await fetch('/api/scrape', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query }),
         });
-        console.log('Scrape response status:', res.status, res.statusText);
-        const text = await res.text(); // Get raw response text first
-        console.log('Scrape response text:', text);
-        let freshData;
-        try {
-          freshData = text ? JSON.parse(text) : [];
-        } catch (parseError) {
-          console.error('Failed to parse JSON:', parseError);
-          setError('Invalid response from scrape server.');
-          setLoading(false);
+
+        // Try to parse; tolerate empty body
+        let freshData: unknown[] = [];
+        const text = await res.text();
+        if (text) {
+          try { freshData = JSON.parse(text); } catch { /* ignore parse error */ }
+        }
+
+        if (!res.ok || freshData.length === 0) {
+          setError('No competitions found after scraping. Try a different query.');
           return;
         }
-        if (!res.ok || (Array.isArray(freshData) && freshData.length === 0)) {
-          setError('No competitions found after scraping. Try a different query.');
-        } else {
-          router.push(`/results?query=${encodeURIComponent(query)}`);
-        }
-      } else {
-        router.push(`/results?query=${encodeURIComponent(query)}`);
       }
+
+      router.push(`/results?query=${encodeURIComponent(query)}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');
     } finally {
@@ -79,24 +71,51 @@ export default function SearchPage() {
     }
   };
 
+  // Use a form so Enter submits naturally anywhere in the input
+  const onSubmit: React.FormEventHandler<HTMLFormElement> = (e) => {
+    e.preventDefault();
+    if (!loading && query.trim().length > 0) {
+      void handleSearch();
+    }
+  };
+
   return (
     <div className="min-h-screen bg-midnight-blue text-wolf-grey flex flex-col items-center justify-center p-8">
-      <img src="/logo.png" alt="PrizeWolf Logo" className="mb-8 w-48 h-auto" />
-      {error && <p className="text-neon-red mb-4">{error}</p>}
-      <input
-        type="text"
-        placeholder="Hunt for Rolex, Audi, or Cash..."
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        className="w-full max-w-md p-3 border border-neon-red rounded-md bg-wolf-grey text-midnight-blue mb-4"
-      />
-      <button
-        onClick={handleSearch}
-        disabled={loading}
-        className="bg-electric-gold text-midnight-blue font-bold py-2 px-6 rounded-md hover:bg-neon-red hover:text-white transition"
-      >
-        {loading ? 'Hunting...' : 'Find Prizes'}
-      </button>
+      {/* Logo slightly larger; keep tight spacing */}
+      <img src="/logo.png" alt="PrizeWolf Logo" className="mb-6 w-56 h-auto" />
+
+      <form onSubmit={onSubmit} className="w-full max-w-md flex flex-col items-stretch">
+        {error && <p className="text-neon-red mb-3">{error}</p>}
+
+        <input
+          type="text"
+          placeholder="Hunt for Rolex, Audi, or Cash..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="w-full p-3 border border-neon-red rounded-md bg-wolf-grey text-midnight-blue mb-3"
+          aria-label="Search prizes"
+        />
+
+        <button
+          type="submit"
+          onClick={(e) => { /* still supports click */ }}
+          disabled={loading || query.trim().length === 0}
+          className="inline-flex items-center justify-center gap-2 bg-electric-gold text-midnight-blue font-bold py-2 px-6 rounded-md hover:bg-neon-red hover:text-white transition disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          {loading && (
+            <svg
+              className="animate-spin h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4A4 4 0 008 12H4z"/>
+            </svg>
+          )}
+          {loading ? 'Hunting...' : 'Find Prizes'}
+        </button>
+      </form>
     </div>
   );
 }
