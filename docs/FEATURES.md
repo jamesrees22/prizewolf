@@ -14,6 +14,7 @@ Use it as a living backlog. Update frequently!
 - [ ] Search also fires on **Enter key** (not just Search button)
 - [ ] Add **loading indicator** (spinner/progress bar) while searching/scraping
 - [ ] Improve odds formatting (e.g. `1 in 3463` → `1 in 3,463`)
+- [ ] Add **favicon** (basic wolf icon until branded assets are ready)
 
 ---
 
@@ -21,7 +22,6 @@ Use it as a living backlog. Update frequently!
 - [ ] UI: Show **Remaining tickets** column in results table
 - [ ] UI polish: enlarge logo, reduce spacing above search box
 - [ ] Results page: add **sort & filter** (odds ↑/↓, entry fee ↑/↓)
-- [ ] Add **favicon** (basic wolf icon until branded assets are ready)
 - [ ] Clean up error handling/logging in scraper route
 - [ ] Add more site adapters (e.g. 7Days Performance, Elite Competitions)
 
