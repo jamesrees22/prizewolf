@@ -50,6 +50,8 @@ Use it as a living backlog. Update frequently!
 - [ ] Browser extension for quick odds lookup
 - [ ] Notification system (email or push) when new comps match saved searches
 - [ ] Affiliate/commission tracking for outbound clicks
+- [ ] Custom wolf running loader animation (Lottie or CSS sprite) for search
+
 
 ---
 
