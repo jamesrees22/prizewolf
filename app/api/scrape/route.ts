@@ -46,7 +46,7 @@ const toInt = (s?: string | null): number | null => {
 
 // Smallest plausible ticket price (avoid cash-alternative/prize values)
 const extractTicketPrice = ($: CheerioAPI): number | null => {
-  const text = $('body').text(); // or $.root().text()
+  const text = $('body').text();
   const poundMatches = Array.from(text.matchAll(/£\s*([\d.,]+)/g))
     .map((m) => toFloat(m[1]))
     .filter((n): n is number => n != null);
@@ -56,23 +56,47 @@ const extractTicketPrice = ($: CheerioAPI): number | null => {
   return Math.min(...plausible);
 };
 
-const extractTotals = ($: CheerioAPI) => {
+// Generic totals extractor (fallback for most sites)
+const extractTotalsGeneric = ($: CheerioAPI) => {
   const text = $('body').text();
 
-  // total tickets
   let total =
     toInt(text.match(/Number of Tickets\s*([\d,]+)/i)?.[1]) ??
     toInt(text.match(/max of\s*([\d,]+)\s*tickets/i)?.[1]) ??
     toInt(text.match(/([\d,]+)\s*entries/i)?.[1]) ??
     null;
 
-  // tickets sold
   let sold =
     toInt(text.match(/Tickets?\s*sold\s*([\d,]+)/i)?.[1]) ??
     toInt(text.match(/Sold:\s*([\d,]+)/i)?.[1]) ??
     null;
 
   if (total != null && sold != null && sold > total) sold = null;
+  return { total, sold };
+};
+
+// Rev Comps–specific totals extractor
+const extractTotalsRevComps = ($: CheerioAPI) => {
+  const text = $('body').text();
+
+  // Look for "PRIZE HAS A MAX OF XXXX TICKETS"
+  const maxPhrase = toInt(text.match(/\bPRIZE HAS A MAX OF\s*([\d,]+)\s*TICKETS\b/i)?.[1]);
+
+  // SOLD / REMAINING
+  let sold = toInt(text.match(/\bSOLD:\s*([\d,]+)/i)?.[1]) ?? null;
+  const remaining = toInt(text.match(/\bREMAINING:\s*([\d,]+)/i)?.[1]) ?? null;
+
+  let total = maxPhrase ?? null;
+  if (total == null && sold != null && remaining != null) total = sold + remaining;
+  if (total != null && sold != null && sold > total) sold = null;
+
+  // If we didn’t find anything good, fall back to generic
+  if (total == null) {
+    const g = extractTotalsGeneric($);
+    total = g.total;
+    if (sold == null) sold = g.sold;
+  }
+
   return { total, sold };
 };
 // -----------------------------
@@ -88,14 +112,14 @@ const sites = [
       if (!prize) return null;
 
       const entry_fee = extractTicketPrice($);
-      const { total: total_tickets, sold: tickets_sold } = extractTotals($);
+      const { total, sold } = extractTotalsRevComps($);
 
       return {
         prize,
         site_name: 'Rev Comps',
         entry_fee,
-        total_tickets,
-        tickets_sold,
+        total_tickets: total,
+        tickets_sold: sold,
         url,
       };
     },
@@ -110,14 +134,14 @@ const sites = [
       if (!prize) return null;
 
       const entry_fee = extractTicketPrice($);
-      const { total: total_tickets, sold: tickets_sold } = extractTotals($);
+      const { total, sold } = extractTotalsGeneric($);
 
       return {
         prize,
         site_name: 'Dream Car Giveaways',
         entry_fee,
-        total_tickets,
-        tickets_sold,
+        total_tickets: total,
+        tickets_sold: sold,
         url,
       };
     },
