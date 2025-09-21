@@ -13,12 +13,12 @@ Use it as a living backlog. Update frequently!
 - Odds now generated as "1 in N remaining"
 - [ ] Search also fires on **Enter key** (not just Search button)
 - [ ] Add **loading indicator** (spinner/progress bar) while searching/scraping
+- [ ] Improve odds formatting (e.g. `1 in 3463` → `1 in 3,463`)
 
 ---
 
 ## 🚧 Now (in progress / near term)
 - [ ] UI: Show **Remaining tickets** column in results table
-- [ ] Improve odds formatting (e.g. `1 in 3463` → `1 in 3,463`)
 - [ ] UI polish: enlarge logo, reduce spacing above search box
 - [ ] Results page: add **sort & filter** (odds ↑/↓, entry fee ↑/↓)
 - [ ] Add **favicon** (basic wolf icon until branded assets are ready)
