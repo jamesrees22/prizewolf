@@ -20,6 +20,11 @@ type Row = {
   scraped_at?: string;
 };
 
+// What we return to the client (enriched, not stored)
+type ApiRow = Row & {
+  remaining_tickets: number | null;
+};
+
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
 
@@ -43,6 +48,11 @@ const toInt = (s?: string | null): number | null => {
   const n = parseInt(s.replace(/[^\d]/g, ''), 10);
   return Number.isFinite(n) ? n : null;
 };
+const computeRemaining = (total: number | null, sold: number | null): number | null => {
+  if (total == null) return null;
+  const rem = total - (sold ?? 0);
+  return rem >= 0 ? rem : null;
+};
 
 // Smallest plausible ticket price (avoid cash-alternative/prize values)
 const extractTicketPrice = ($: CheerioAPI): number | null => {
@@ -50,16 +60,13 @@ const extractTicketPrice = ($: CheerioAPI): number | null => {
   const poundMatches = Array.from(text.matchAll(/£\s*([\d.,]+)/g))
     .map((m) => toFloat(m[1]))
     .filter((n): n is number => n != null);
-
   const plausible = poundMatches.filter((v) => v >= 0.1 && v <= 50);
   if (plausible.length === 0) return null;
   return Math.min(...plausible);
 };
 
-// Generic totals extractor (fallback for most sites)
 const extractTotalsGeneric = ($: CheerioAPI) => {
   const text = $('body').text();
-
   let total =
     toInt(text.match(/Number of Tickets\s*([\d,]+)/i)?.[1]) ??
     toInt(text.match(/max of\s*([\d,]+)\s*tickets/i)?.[1]) ??
@@ -75,14 +82,10 @@ const extractTotalsGeneric = ($: CheerioAPI) => {
   return { total, sold };
 };
 
-// Rev Comps–specific totals extractor
 const extractTotalsRevComps = ($: CheerioAPI) => {
   const text = $('body').text();
 
-  // Look for "PRIZE HAS A MAX OF XXXX TICKETS"
   const maxPhrase = toInt(text.match(/\bPRIZE HAS A MAX OF\s*([\d,]+)\s*TICKETS\b/i)?.[1]);
-
-  // SOLD / REMAINING
   let sold = toInt(text.match(/\bSOLD:\s*([\d,]+)/i)?.[1]) ?? null;
   const remaining = toInt(text.match(/\bREMAINING:\s*([\d,]+)/i)?.[1]) ?? null;
 
@@ -90,13 +93,11 @@ const extractTotalsRevComps = ($: CheerioAPI) => {
   if (total == null && sold != null && remaining != null) total = sold + remaining;
   if (total != null && sold != null && sold > total) sold = null;
 
-  // If we didn’t find anything good, fall back to generic
   if (total == null) {
     const g = extractTotalsGeneric($);
     total = g.total;
     if (sold == null) sold = g.sold;
   }
-
   return { total, sold };
 };
 // -----------------------------
@@ -151,7 +152,8 @@ const sites = [
 export async function POST(req: NextRequest) {
   try {
     const { query } = await req.json().catch(() => ({ query: '' as string }));
-    const rows: Row[] = [];
+    const upsertRows: Row[] = [];
+    const apiRows: ApiRow[] = [];
     const seen = new Set<string>();
 
     for (const site of sites) {
@@ -182,7 +184,15 @@ export async function POST(req: NextRequest) {
               continue;
             }
 
-            rows.push({ ...parsed, scraped_at: new Date().toISOString() });
+            const scraped_at = new Date().toISOString();
+            const remaining_tickets = computeRemaining(parsed.total_tickets, parsed.tickets_sold);
+
+            const row: Row = { ...parsed, scraped_at };
+            upsertRows.push(row);
+
+            const apiRow: ApiRow = { ...row, remaining_tickets };
+            apiRows.push(apiRow);
+
             await new Promise((r) => setTimeout(r, 250));
           } catch (e) {
             console.warn(`Detail parse failed for ${site.name}: ${url}`, e);
@@ -193,10 +203,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (rows.length) {
+    if (upsertRows.length) {
       const { error } = await supabase
         .from('competitions')
-        .upsert(rows, { onConflict: 'url', ignoreDuplicates: false })
+        .upsert(upsertRows, { onConflict: 'url', ignoreDuplicates: false })
         .select();
       if (error) {
         console.error('Supabase upsert error:', error);
@@ -204,7 +214,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return NextResponse.json(rows, { status: 200 });
+    return NextResponse.json(apiRows, { status: 200 });
   } catch (err: any) {
     console.error('Scrape route error:', err);
     return NextResponse.json({ error: err?.message ?? 'Unknown error' }, { status: 500 });
