@@ -16,6 +16,8 @@ type Row = {
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
+  remaining_tickets?: number | null;
+  odds?: number | null;
   url: string;
   scraped_at?: string;
 };
@@ -26,7 +28,7 @@ type AdapterRules = {
 };
 
 type SiteCfg = {
-  id: string;                // <-- added
+  id: string;
   name: string;
   list_url: string;
   link_selector: string;
@@ -224,7 +226,7 @@ export async function POST(req: NextRequest) {
     // Load enabled sites (respect tier)
     const { data: sitesData, error: sitesErr } = await supabase
       .from('sites')
-      .select('id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled') // <-- id added
+      .select('id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled')
       .eq('enabled', true);
 
     if (sitesErr) throw sitesErr;
@@ -255,7 +257,7 @@ export async function POST(req: NextRequest) {
     // Process each site with its own scrape_run
     for (const site of siteRows) {
       // 1) Create the run (started)
-      const { data: runStart, error: runErr } = await supabase
+      const { data: runStart } = await supabase
         .from('scrape_runs')
         .insert({ site_id: site.id, status: 'started' })
         .select('id')
@@ -298,19 +300,22 @@ export async function POST(req: NextRequest) {
 
             const scraped_at = new Date().toISOString();
             const remaining_tickets = computeRemaining(parsed.total_tickets, parsed.tickets_sold);
+            const odds = parsed.total_tickets ?? null;
 
-            const row: Row = { ...parsed, scraped_at };
+            const row: Row = {
+              ...parsed,
+              scraped_at,
+              remaining_tickets,
+              odds,
+            };
+
             upsertRows.push(row);
-            apiRows.push({
-              ...row,
-              // ensure remaining and odds fields exist in your table schema
-              // (you already have them as nullable columns)
-            });
+            apiRows.push(row);
 
             if (site.rate_limit_ms) {
               await new Promise((res) => setTimeout(res, site.rate_limit_ms!));
             }
-          } catch (e) {
+          } catch {
             // Skip bad detail pages, continue with other links
             continue;
           }
@@ -370,10 +375,6 @@ export async function POST(req: NextRequest) {
     }
 
     // If anything was found, return it
-    if (upsertRows.length) {
-      // (Already upserted above; nothing to do here)
-    }
-
     return NextResponse.json(apiRows, { status: 200 });
   } catch (err: any) {
     console.error('Scrape route error:', err);
