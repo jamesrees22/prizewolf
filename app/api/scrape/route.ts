@@ -10,14 +10,28 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY as string
 );
 
-type Row = {
+// What we return to the client (can include computed fields)
+type ApiRow = {
   prize: string;
   site_name: string;
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
+  remaining_tickets?: number | null; // ok to compute & return
+  odds?: number | null;              // computed; do NOT store if DB has it generated
+  url: string;
+  scraped_at?: string;
+};
+
+// What we write to DB (strictly exclude generated columns)
+type DbRow = {
+  prize: string;
+  site_name: string;
+  entry_fee: number | null;
+  total_tickets: number | null;
+  tickets_sold: number | null;
+  // If remaining_tickets is a generated column in your DB, remove the next line:
   remaining_tickets?: number | null;
-  odds?: number | null;
   url: string;
   scraped_at?: string;
 };
@@ -32,7 +46,7 @@ type SiteCfg = {
   name: string;
   list_url: string;
   link_selector: string;
-  adapter_key: string; // 'revcomps' | 'dcg' | 'generic' | future keys
+  adapter_key: string; // 'revcomps' | 'dcg' | 'generic'
   rate_limit_ms: number | null;
   tier: 'free' | 'premium' | 'both';
   enabled: boolean;
@@ -70,19 +84,15 @@ const computeRemaining = (total?: number | null, sold?: number | null) => {
 };
 
 const parsePrice = ($: CheerioAPI, rules?: any) => {
-  // Try rule-based selectors first
   const priceSelectors: string[] = rules?.price_selectors ?? [];
   for (const sel of priceSelectors) {
     const text = $(sel).first().text();
     const n = toFloat(text);
     if (n != null) return n;
   }
-  // Fallback: pick plausible £ values in body text
   const body = $('body').text();
   const matches = body.match(/\b£?\s?(\d+(?:\.\d{1,2})?)\b/g) || [];
-  const nums = matches
-    .map((m) => toFloat(m))
-    .filter((n): n is number => n != null);
+  const nums = matches.map((m) => toFloat(m)).filter((n): n is number => n != null);
   if (nums.length === 0) return null;
 
   const min = rules?.price_window?.min ?? 0.1;
@@ -92,7 +102,7 @@ const parsePrice = ($: CheerioAPI, rules?: any) => {
   return Math.min(...plausible);
 };
 
-// Generic totals extractor; accepts optional rule arrays
+// Generic totals extractor
 const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
 
@@ -115,7 +125,7 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
     const m = text.match(re);
     if (m) {
       total = toInt(m[2] ?? m[1]);
-      if (m[2]) sold = toInt(m[1]); // when pattern includes sold/total
+      if (m[2]) sold = toInt(m[1]);
       break;
     }
   }
@@ -134,7 +144,6 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   return { total, sold };
 };
 
-// Rev Comps — prefer explicit MAX + SOLD/REMAINING, then fallback
 const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
 
@@ -154,7 +163,6 @@ const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
   return { total, sold };
 };
 
-// Dream Car Giveaways — prefer Remaining/Sold/Max entries; avoid stray numbers
 const extractTotalsDCG = ($: CheerioAPI) => {
   const text = $('body').text();
 
@@ -173,10 +181,9 @@ const extractTotalsDCG = ($: CheerioAPI) => {
 };
 
 const buildParser = (adapter_key: string, rules?: any) => {
-  return (html: string, url: string, siteName: string): Row | null => {
+  return (html: string, url: string, siteName: string): ApiRow | null => {
     const $ = load(html);
 
-    // Prize (rules or common selectors)
     const prize =
       $(rules?.prize_selectors?.join(',') ?? '').first().text().trim() ||
       $('h1, h2.product_title, .woocommerce-loop-product__title').first().text().trim() ||
@@ -184,13 +191,11 @@ const buildParser = (adapter_key: string, rules?: any) => {
 
     if (!prize) return null;
 
-    // Price
     const entry_fee =
       parsePrice($, rules) ??
       toFloat($('.price').first().text()) ??
       toFloat($('[class*="price"]').first().text());
 
-    // Totals
     let totals: { total: number | null; sold: number | null };
     switch (adapter_key) {
       case 'revcomps':
@@ -218,58 +223,44 @@ const buildParser = (adapter_key: string, rules?: any) => {
 
 export async function POST(req: NextRequest) {
   try {
-    // request body: { query?: string, tier?: 'free'|'premium'|'both' }
     const body = await req.json().catch(() => ({} as any));
     const query: string = String(body?.query ?? '');
-    const userTier: 'free' | 'premium' | 'both' = (body?.tier ?? 'both');
+    const userTier: 'free' | 'premium' | 'both' = body?.tier ?? 'both';
 
-    // Load enabled sites (respect tier)
     const { data: sitesData, error: sitesErr } = await supabase
       .from('sites')
       .select('id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled')
       .eq('enabled', true);
-
     if (sitesErr) throw sitesErr;
 
     const siteRows: SiteCfg[] =
       (sitesData ?? []).filter((s: SiteCfg) =>
         userTier === 'both' ? true : (s.tier === 'both' || s.tier === userTier)
       );
+    if (siteRows.length === 0) return NextResponse.json([], { status: 200 });
 
-    if (siteRows.length === 0) {
-      return NextResponse.json([], { status: 200 });
-    }
-
-    // Load adapter rules (still used by 'generic' and fallbacks)
     const { data: rulesData, error: rulesErr } = await supabase
       .from('adapter_rules')
       .select('adapter_key,rules');
-
     if (rulesErr) throw rulesErr;
 
     const rulesMap = new Map<string, any>();
     (rulesData ?? []).forEach((r: AdapterRules) => rulesMap.set(r.adapter_key, r.rules));
 
-    const apiRows: Row[] = [];
-    const upsertRows: Row[] = [];
+    const apiRows: ApiRow[] = [];
+    const dbRows: DbRow[] = []; // <— strictly DB-safe payload (no generated cols)
     const seen = new Set<string>();
 
-    // Process each site with its own scrape_run
     for (const site of siteRows) {
-      // 1) Create the run (started)
       const { data: runStart } = await supabase
         .from('scrape_runs')
         .insert({ site_id: site.id, status: 'started' })
         .select('id')
         .single();
-
       const runId = runStart?.id as number | undefined;
-
-      // Keep track of per-site upserts
-      const upsertsBefore = upsertRows.length;
+      const before = dbRows.length;
 
       try {
-        // 2) Scrape list page
         const listHtml = await fetchHtml(site.list_url);
         const $ = load(listHtml);
 
@@ -294,54 +285,52 @@ export async function POST(req: NextRequest) {
             const parsed = parseDetail(detailHtml, url, site.name);
             if (!parsed) continue;
 
-            if (query && !parsed.prize.toLowerCase().includes(query.toLowerCase())) {
-              continue;
-            }
+            if (query && !parsed.prize.toLowerCase().includes(query.toLowerCase())) continue;
 
             const scraped_at = new Date().toISOString();
             const remaining_tickets = computeRemaining(parsed.total_tickets, parsed.tickets_sold);
             const odds = parsed.total_tickets ?? null;
 
-            const row: Row = {
+            // What we return to the API consumer
+            const apiRow: ApiRow = {
               ...parsed,
               scraped_at,
               remaining_tickets,
               odds,
             };
+            apiRows.push(apiRow);
 
-            // Build an upsert payload that EXCLUDES generated columns
-            const upsertRow = {
-              prize: row.prize,
-              site_name: row.site_name,
-              entry_fee: row.entry_fee,
-              total_tickets: row.total_tickets,
-              tickets_sold: row.tickets_sold,
-              remaining_tickets: row.remaining_tickets, // keep if NOT generated in your schema
-              url: row.url,
-              scraped_at: row.scraped_at,
+            // What we persist to DB — EXCLUDES generated cols like `odds`
+            const dbRow: DbRow = {
+              prize: apiRow.prize,
+              site_name: apiRow.site_name,
+              entry_fee: apiRow.entry_fee,
+              total_tickets: apiRow.total_tickets,
+              tickets_sold: apiRow.tickets_sold,
+              // remove the next line if remaining_tickets is generated in your DB
+              remaining_tickets: apiRow.remaining_tickets,
+              url: apiRow.url,
+              scraped_at: apiRow.scraped_at,
             };
-
-            upsertRows.push(row);
-            apiRows.push(row);
+            dbRows.push(dbRow);
 
             if (site.rate_limit_ms) {
-              await new Promise((res) => setTimeout(res, site.rate_limit_ms!));
+              await new Promise((res) => setTimeout(res, site.rate_limit_ms));
             }
           } catch {
-            // Skip bad detail pages, continue with other links
             continue;
           }
         }
 
-        // 3) Upsert (global, but we'll count how many this site contributed)
-        if (upsertRows.length > upsertsBefore) {
+        // Upsert ONLY the DB-safe rows we just added for this site
+        const added = dbRows.length - before;
+        if (added > 0) {
+          const payload = dbRows.slice(before); // isolate this site's batch
           const { error } = await supabase
             .from('competitions')
-            .upsert(upsertRows, { onConflict: 'url', ignoreDuplicates: false })
+            .upsert(payload as any, { onConflict: 'url', ignoreDuplicates: false })
             .select();
           if (error) {
-            console.error('Supabase upsert error:', error);
-            // Mark this site's run as error
             if (runId) {
               await supabase
                 .from('scrape_runs')
@@ -352,25 +341,21 @@ export async function POST(req: NextRequest) {
                 })
                 .eq('id', runId);
             }
-            // Continue to next site rather than failing entire request
             continue;
           }
         }
 
-        // 4) Mark run ok
-        const siteCount = upsertRows.length - upsertsBefore;
         if (runId) {
           await supabase
             .from('scrape_runs')
             .update({
               status: 'ok',
-              items_ingested: siteCount,
+              items_ingested: added,
               finished_at: new Date().toISOString(),
             })
             .eq('id', runId);
         }
       } catch (siteErr: any) {
-        // Mark this site's run as error
         if (runId) {
           await supabase
             .from('scrape_runs')
@@ -381,12 +366,10 @@ export async function POST(req: NextRequest) {
             })
             .eq('id', runId);
         }
-        // Continue with other sites
         continue;
       }
     }
 
-    // If anything was found, return it
     return NextResponse.json(apiRows, { status: 200 });
   } catch (err: any) {
     console.error('Scrape route error:', err);
