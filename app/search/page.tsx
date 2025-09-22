@@ -82,7 +82,7 @@ export default function SearchPage() {
   return (
     <div className="min-h-screen bg-midnight-blue text-wolf-grey flex flex-col items-center justify-center p-8">
       {/* Logo slightly larger; keep tight spacing */}
-      <img src="/logo.png" alt="PrizeWolf Logo" className="mb-4 w-72 h-auto" />
+      <img src="/logo.png" alt="PrizeWolf Logo" className="mb-2 w-72 h-auto" />
 
       <form onSubmit={onSubmit} className="w-full max-w-md flex flex-col items-stretch">
         {error && <p className="text-neon-red mb-3">{error}</p>}
