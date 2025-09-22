@@ -23,15 +23,13 @@ type ApiRow = {
   scraped_at?: string;
 };
 
-// What we write to DB (exclude generated columns like `odds`)
+// What we write to DB (exclude generated columns like `odds`, `remaining_tickets`)
 type DbRow = {
   prize: string;
   site_name: string;
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
-  // If remaining_tickets is generated in your DB, remove this property:
-  remaining_tickets?: number | null;
   url: string;
   scraped_at?: string;
 };
@@ -221,23 +219,52 @@ const buildParser = (adapter_key: string, rules?: any) => {
   };
 };
 
+// --- new: robust site loader with fallback + logging ---
+async function loadSites(userTier: 'free' | 'premium' | 'both') {
+  const baseSel = 'id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled';
+
+  // First try enabled=true
+  let { data, error } = await supabase
+    .from('sites')
+    .select(baseSel)
+    .eq('enabled', true);
+
+  if (error) throw error;
+  let rows = (data ?? []) as SiteCfg[];
+
+  // If none found, fallback to all (helps when enabled flags are not set yet)
+  if (!rows.length) {
+    const retry = await supabase.from('sites').select(baseSel);
+    if (retry.error) throw retry.error;
+    rows = (retry.data ?? []) as SiteCfg[];
+    console.warn('[scrape] No sites with enabled=true; falling back to all sites. Count:', rows.length);
+  }
+
+  // Tier filter
+  const filtered = rows.filter((s) =>
+    userTier === 'both' ? true : (s.tier === 'both' || s.tier === userTier)
+  );
+
+  console.log('[scrape] sites loaded:', {
+    total: rows.length,
+    filtered: filtered.length,
+    names: filtered.map((s) => s.name),
+  });
+
+  return filtered;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({} as any));
     const query: string = String(body?.query ?? '');
     const userTier: 'free' | 'premium' | 'both' = body?.tier ?? 'both';
 
-    const { data: sitesData, error: sitesErr } = await supabase
-      .from('sites')
-      .select('id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled')
-      .eq('enabled', true);
-    if (sitesErr) throw sitesErr;
-
-    const siteRows: SiteCfg[] =
-      (sitesData ?? []).filter((s: SiteCfg) =>
-        userTier === 'both' ? true : (s.tier === 'both' || s.tier === userTier)
-      );
-    if (siteRows.length === 0) return NextResponse.json([], { status: 200 });
+    const siteRows = await loadSites(userTier);
+    if (siteRows.length === 0) {
+      console.warn('[scrape] No sites after filtering. Returning empty array.');
+      return NextResponse.json([], { status: 200 });
+    }
 
     const { data: rulesData, error: rulesErr } = await supabase
       .from('adapter_rules')
@@ -274,6 +301,8 @@ export async function POST(req: NextRequest) {
           )
         ).slice(0, 60);
 
+        console.log(`[scrape] ${site.name}: links found`, links.length);
+
         const parseDetail = buildParser(site.adapter_key, rulesMap.get(site.adapter_key));
 
         for (const url of links) {
@@ -307,22 +336,23 @@ export async function POST(req: NextRequest) {
               entry_fee: apiRow.entry_fee,
               total_tickets: apiRow.total_tickets,
               tickets_sold: apiRow.tickets_sold,
-              // remove next line if remaining_tickets is generated in your DB
-              remaining_tickets: apiRow.remaining_tickets,
               url: apiRow.url,
               scraped_at: apiRow.scraped_at,
             };
+
             dbRows.push(dbRow);
 
-            // Respect per-site rate limit safely (handles number | null)
             await sleep(site.rate_limit_ms);
-          } catch {
+          } catch (e) {
+            console.warn(`[scrape] detail error for ${url}:`, (e as any)?.message ?? e);
             continue;
           }
         }
 
         // Upsert ONLY the DB-safe rows we just added for this site
         const added = dbRows.length - before;
+        console.log(`[scrape] ${site.name}: rows parsed`, added);
+
         if (added > 0) {
           const payload = dbRows.slice(before);
           const { error } = await supabase
@@ -340,6 +370,7 @@ export async function POST(req: NextRequest) {
                 })
                 .eq('id', runId);
             }
+            console.error(`[scrape] upsert error for ${site.name}:`, error.message);
             continue;
           }
         }
@@ -365,10 +396,12 @@ export async function POST(req: NextRequest) {
             })
             .eq('id', runId);
         }
+        console.error(`[scrape] site-level error for ${site.name}:`, siteErr?.message ?? siteErr);
         continue;
       }
     }
 
+    console.log('[scrape] total apiRows returned:', apiRows.length);
     return NextResponse.json(apiRows, { status: 200 });
   } catch (err: any) {
     console.error('Scrape route error:', err);
