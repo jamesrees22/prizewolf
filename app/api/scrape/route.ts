@@ -82,7 +82,7 @@ const computeRemaining = (total?: number | null, sold?: number | null) => {
   return r >= 0 ? r : null;
 };
 
-// ---------- PRICE helpers (robust, no hard cutoffs) ----------
+// ---------- PRICE helpers ----------
 const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | null } => {
   const blocks = $('script[type="application/ld+json"]')
     .map((_, el) => $(el).contents().text())
@@ -119,10 +119,12 @@ const readMetaPrice = ($: CheerioAPI): number | null => {
   return null;
 };
 
-// Collect many price candidates (selectors + WC + data + body)
+// Collect many price candidates (selectors + WC + data + text)
 const collectPriceCandidates = ($: CheerioAPI, rules?: any): number[] => {
   const cands: number[] = [];
-  const pushN = (n: number | null) => { if (n != null && Number.isFinite(n)) cands.push(n); };
+  const pushN = (n: number | null) => {
+    if (n != null && Number.isFinite(n)) cands.push(Number(n.toFixed(2)));
+  };
 
   // Site-provided selectors first
   (rules?.price_selectors ?? []).forEach((sel: string) => pushN(toFloat($(sel).first().text())));
@@ -144,12 +146,18 @@ const collectPriceCandidates = ($: CheerioAPI, rules?: any): number[] => {
     pushN(toFloat($(el).attr('data-ticket-price')));
   });
 
-  // Whole-page text (last resort)
+  // STRICT text scan: require a £ sign to avoid stray integers like "1"
   const body = $('body').text();
-  const matches = body.match(/\b£?\s?(\d+(?:\.\d{1,2})?)\b/g) || [];
-  matches.forEach((m) => pushN(toFloat(m)));
+  const strictMatches = body.match(/£\s?(\d+(?:\.\d{1,2})?)/g) || [];
+  strictMatches.forEach((m) => pushN(toFloat(m)));
 
-  // Optional numeric range from rules
+  // RELAXED scan (no £) only if nothing found strictly
+  if (!strictMatches.length) {
+    const relaxed = body.match(/\b(\d+(?:\.\d{1,2})?)\b/g) || [];
+    relaxed.forEach((m) => pushN(toFloat(m)));
+  }
+
+  // Optional numeric range from rules (broad defaults)
   const min: number | null = rules?.price_min ?? 0.01;
   const max: number | null = rules?.price_max ?? 100;
   return cands.filter((n) => (min == null || n >= min) && (max == null || n <= max));
@@ -157,25 +165,40 @@ const collectPriceCandidates = ($: CheerioAPI, rules?: any): number[] => {
 
 // Choose the most likely ticket price
 // 1) If trusted (JSON-LD/meta) -> return it
-// 2) Prefer values within a "preference" range (adapter-rules) by frequency
-// 3) Else choose the most frequent overall
+// 2) Prefer DECIMAL prices under `price_prefer_under` (default £1.00)
+// 3) Prefer decimals in window (default 0.15–5.00)
+// 4) Any decimals
+// 5) Integers in window
+// 6) Smallest overall
 const chooseBestPrice = (cands: number[], trusted?: number | null, rules?: any): number | null => {
   if (trusted != null) return trusted;
   if (!cands.length) return null;
 
   const preferMin = rules?.price_prefer_min ?? 0.15;
   const preferMax = rules?.price_prefer_max ?? 5.0;
+  const preferUnder = rules?.price_prefer_under ?? 1.0;
 
-  const freq = (arr: number[]) => {
-    const m = new Map<number, number>();
-    arr.forEach((n) => m.set(n, (m.get(n) ?? 0) + 1));
-    return [...m.entries()].sort((a, b) => b[1] - a[1]); // by count desc
-  };
+  const inWin = (n: number) => n >= preferMin && n <= preferMax;
+  const hasDecimals = (n: number) => Math.abs(n - Math.round(n)) > 1e-9;
 
-  const preferred = cands.filter((n) => n >= preferMin && n <= preferMax);
-  const pick = (ents: [number, number][]) => ents.length ? ents[0][0] : null;
+  // 1) decimals strictly under £1.00 (or adapter override)
+  const decUnder = cands.filter((n) => hasDecimals(n) && n < preferUnder);
+  if (decUnder.length) return Math.min(...decUnder);
 
-  return pick(freq(preferred)) ?? pick(freq(cands));
+  // 2) decimals within window
+  const decIn = cands.filter((n) => inWin(n) && hasDecimals(n));
+  if (decIn.length) return Math.min(...decIn);
+
+  // 3) any decimals (prefer smallest)
+  const decAll = cands.filter(hasDecimals);
+  if (decAll.length) return Math.min(...decAll);
+
+  // 4) integers within window (prefer smallest)
+  const intIn = cands.filter((n) => inWin(n) && !hasDecimals(n));
+  if (intIn.length) return Math.min(...intIn);
+
+  // 5) smallest overall
+  return Math.min(...cands);
 };
 
 // ---------- totals extractors ----------
@@ -334,7 +357,7 @@ const buildParser = (adapter_key: string, rules?: any) => {
 
     if (!prize) return null;
 
-    // PRICE (trust JSON-LD/meta -> most-common candidate, prefer 0.15–5 if available)
+    // PRICE (trust JSON-LD/meta -> choose from candidates with decimal preference)
     const metaPrice = readMetaPrice($);
     const candPrices = collectPriceCandidates($, rules);
     const entry_fee = chooseBestPrice(candPrices, ld.price ?? metaPrice ?? null, rules);
@@ -512,9 +535,7 @@ export async function POST(req: NextRequest) {
               ...parsed,
               scraped_at,
               odds: parsed.total_tickets ?? null,
-              // remaining_tickets may already be set from the parser
             };
-            // ensure remaining_tickets present if can be derived
             if (apiRow.remaining_tickets == null) {
               apiRow.remaining_tickets = computeRemaining(apiRow.total_tickets, apiRow.tickets_sold) ?? undefined;
             }
