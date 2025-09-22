@@ -309,6 +309,18 @@ export async function POST(req: NextRequest) {
               odds,
             };
 
+            // Build an upsert payload that EXCLUDES generated columns
+            const upsertRow = {
+              prize: row.prize,
+              site_name: row.site_name,
+              entry_fee: row.entry_fee,
+              total_tickets: row.total_tickets,
+              tickets_sold: row.tickets_sold,
+              remaining_tickets: row.remaining_tickets, // keep if NOT generated in your schema
+              url: row.url,
+              scraped_at: row.scraped_at,
+            };
+
             upsertRows.push(row);
             apiRows.push(row);
 
