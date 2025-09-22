@@ -17,29 +17,26 @@ type ApiRow = {
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
-  remaining_tickets?: number | null; // ok to compute & return
-  odds?: number | null;              // computed; do NOT store if DB has it generated
+  remaining_tickets?: number | null; // computed/returned
+  odds?: number | null;              // computed/returned only
   url: string;
   scraped_at?: string;
 };
 
-// What we write to DB (strictly exclude generated columns)
+// What we write to DB (exclude generated columns like `odds`)
 type DbRow = {
   prize: string;
   site_name: string;
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
-  // If remaining_tickets is a generated column in your DB, remove the next line:
+  // If remaining_tickets is generated in your DB, remove this property:
   remaining_tickets?: number | null;
   url: string;
   scraped_at?: string;
 };
 
-type AdapterRules = {
-  adapter_key: string;
-  rules: any;
-};
+type AdapterRules = { adapter_key: string; rules: any };
 
 type SiteCfg = {
   id: string;
@@ -65,6 +62,9 @@ const fetchHtml = async (url: string): Promise<string> => {
 };
 
 // ---------- helpers ----------
+const sleep = (ms?: number | null) =>
+  ms && ms > 0 ? new Promise<void>((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+
 const toFloat = (s?: string | null): number | null => {
   if (!s) return null;
   const n = parseFloat(s.replace(/[^\d.]/g, ''));
@@ -248,7 +248,7 @@ export async function POST(req: NextRequest) {
     (rulesData ?? []).forEach((r: AdapterRules) => rulesMap.set(r.adapter_key, r.rules));
 
     const apiRows: ApiRow[] = [];
-    const dbRows: DbRow[] = []; // <— strictly DB-safe payload (no generated cols)
+    const dbRows: DbRow[] = []; // strictly DB-safe payload (no generated cols)
     const seen = new Set<string>();
 
     for (const site of siteRows) {
@@ -291,7 +291,7 @@ export async function POST(req: NextRequest) {
             const remaining_tickets = computeRemaining(parsed.total_tickets, parsed.tickets_sold);
             const odds = parsed.total_tickets ?? null;
 
-            // What we return to the API consumer
+            // API row (includes computed fields)
             const apiRow: ApiRow = {
               ...parsed,
               scraped_at,
@@ -300,23 +300,22 @@ export async function POST(req: NextRequest) {
             };
             apiRows.push(apiRow);
 
-            // What we persist to DB — EXCLUDES generated cols like `odds`
+            // DB row (excludes generated fields like `odds`)
             const dbRow: DbRow = {
               prize: apiRow.prize,
               site_name: apiRow.site_name,
               entry_fee: apiRow.entry_fee,
               total_tickets: apiRow.total_tickets,
               tickets_sold: apiRow.tickets_sold,
-              // remove the next line if remaining_tickets is generated in your DB
+              // remove next line if remaining_tickets is generated in your DB
               remaining_tickets: apiRow.remaining_tickets,
               url: apiRow.url,
               scraped_at: apiRow.scraped_at,
             };
             dbRows.push(dbRow);
 
-            if (site.rate_limit_ms) {
-              await new Promise((res) => setTimeout(res, site.rate_limit_ms));
-            }
+            // Respect per-site rate limit safely (handles number | null)
+            await sleep(site.rate_limit_ms);
           } catch {
             continue;
           }
@@ -325,7 +324,7 @@ export async function POST(req: NextRequest) {
         // Upsert ONLY the DB-safe rows we just added for this site
         const added = dbRows.length - before;
         if (added > 0) {
-          const payload = dbRows.slice(before); // isolate this site's batch
+          const payload = dbRows.slice(before);
           const { error } = await supabase
             .from('competitions')
             .upsert(payload as any, { onConflict: 'url', ignoreDuplicates: false })
