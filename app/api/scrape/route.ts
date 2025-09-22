@@ -81,6 +81,14 @@ const computeRemaining = (total?: number | null, sold?: number | null) => {
   return r >= 0 ? r : null;
 };
 
+// Accept both raw patterns ("\\/competitions\\/" with no slashes) and slash-delimited (/.../flags)
+const parseRuleRegex = (rule?: string | null, defaultFlags = 'i'): RegExp | null => {
+  if (!rule) return null;
+  const m = rule.match(/^\/(.+)\/([a-z]*)$/i);
+  if (m) return new RegExp(m[1], m[2] || defaultFlags);
+  return new RegExp(rule, defaultFlags);
+};
+
 // ---------- PRICE helpers ----------
 const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | null } => {
   const blocks = $('script[type="application/ld+json"]')
@@ -92,18 +100,22 @@ const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | nul
       const data = JSON.parse(raw);
       const nodes = Array.isArray(data) ? data : [data];
       for (const node of nodes) {
-        const graph = Array.isArray(node?.['@graph']) ? node['@graph'] : [node];
+        const graph = Array.isArray((node as any)['@graph']) ? (node as any)['@graph'] : [node];
         for (const g of graph) {
-          const typeArr = g?.['@type'] ? (Array.isArray(g['@type']) ? g['@type'] : [g['@type']]) : [];
+          const typeArr = (g as any)['@type']
+            ? (Array.isArray((g as any)['@type']) ? (g as any)['@type'] : [(g as any)['@type']])
+            : [];
           if (typeArr.includes('Product')) {
-            const offers = Array.isArray(g.offers) ? g.offers[0] : g.offers;
+            const offers = Array.isArray((g as any).offers) ? (g as any).offers[0] : (g as any).offers;
             const price = offers?.price ? Number(String(offers.price).replace(/[^\d.]/g, '')) : null;
-            const name = typeof g.name === 'string' ? g.name.trim() : undefined;
+            const name = typeof (g as any).name === 'string' ? (g as any).name.trim() : undefined;
             if (name || price != null) return { name, price: price ?? null };
           }
         }
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
   return {};
 };
@@ -134,7 +146,7 @@ const collectPriceCandidates = ($: CheerioAPI, rules?: any): number[] => {
     '.woocommerce-Price-amount',
     '.price .amount',
     '[class*="price"] .amount',
-    '[class*="price"]'
+    '[class*="price"]',
   ].forEach((sel) => pushN(toFloat($(sel).first().text())));
 
   // data-* attributes that sometimes hold a price
@@ -189,7 +201,7 @@ const chooseBestPrice = (cands: number[], trusted?: number | null, rules?: any):
   return Math.min(...cands);
 };
 
-/** DCG-specific price reader driven by rules: looks near "price_anchor_text" (e.g., "Online Entry") */
+/** Optional: price reader near a known anchor (e.g., "Online Entry") via rules.price_anchor_text */
 const extractPriceViaAnchor = ($: CheerioAPI, rules?: any): number | null => {
   const anchor: string | undefined = rules?.price_anchor_text;
   if (!anchor) return null;
@@ -209,7 +221,7 @@ const extractPriceViaAnchor = ($: CheerioAPI, rules?: any): number | null => {
 // ---------- totals extractors ----------
 type Totals = { total: number | null; sold: number | null; remaining?: number | null };
 
-/** Try selectors from rules first (total_selector/sold_selector/remaining_selector) */
+/** selectors first (rules.total_selector / sold_selector / remaining_selector) */
 const extractTotalsFromSelectors = ($: CheerioAPI, rules?: any): Totals | null => {
   if (!rules) return null;
 
@@ -225,7 +237,6 @@ const extractTotalsFromSelectors = ($: CheerioAPI, rules?: any): Totals | null =
   const remaining = read(rules.remaining_selector);
 
   if (total != null || sold != null || remaining != null) {
-    // derive missing piece if possible
     let t = total, s = sold, r = remaining;
     if (t == null && s != null && r != null) t = s + r;
     if (s == null && t != null && r != null) s = t - r;
@@ -239,11 +250,9 @@ const extractTotalsFromSelectors = ($: CheerioAPI, rules?: any): Totals | null =
 
 // Regex/text fallback
 const extractTotalsGeneric = ($: CheerioAPI, rules?: any): Totals => {
-  // 1) selector-first
   const selRes = extractTotalsFromSelectors($, rules);
   if (selRes) return selRes;
 
-  // 2) text patterns
   const text = $('body').text();
 
   const totalPats: string[] = rules?.total_patterns ?? [
@@ -330,15 +339,12 @@ const scanScriptsAndAttrsForTotals = ($: CheerioAPI, rules?: any): Totals => {
 };
 
 const extractTotalsRevComps = ($: CheerioAPI, rules?: any): Totals => {
-  // selectors first
   const selRes = extractTotalsFromSelectors($, rules);
   if (selRes) return selRes;
 
-  // script/html hints
   const scr = scanScriptsAndAttrsForTotals($, rules);
   if (scr.total != null || scr.sold != null || scr.remaining != null) return scr;
 
-  // body text
   const text = $('body').text();
   const maxPhrase = toInt(text.match(/\bPRIZE HAS A MAX OF\s*([\d,]+)\s*TICKETS\b/i)?.[1]);
   let sold = toInt(text.match(/\bSOLD:\s*([\d,]+)/i)?.[1]) ?? null;
@@ -356,7 +362,7 @@ const extractTotalsRevComps = ($: CheerioAPI, rules?: any): Totals => {
   return { total, sold, remaining };
 };
 
-// DCG: selectors from rules → scripts/attrs → text
+// DCG: selectors → scripts/attrs → text
 const extractTotalsDCG = ($: CheerioAPI, rules?: any): Totals => {
   const selRes = extractTotalsFromSelectors($, rules);
   if (selRes) return selRes;
@@ -396,7 +402,7 @@ const buildParser = (adapter_key: string, rules?: any) => {
       }
     }
 
-    // TOTALS (selectors → scripts → text)
+    // TOTALS
     let totals: Totals;
     switch (adapter_key) {
       case 'revcomps':
@@ -505,24 +511,25 @@ export async function POST(req: NextRequest) {
           )
         );
 
-        // Allow/Deny via adapter rules
-        const rules = rulesMap.get(site.adapter_key) ?? {};
+        // Keep a copy for fallback in case rules over-filter
+        const originalLinks = links.slice();
 
-        const defaultAllow =
+        // Allow/Deny via adapter rules (with robust regex parsing)
+        const siteRules = rulesMap.get(site.adapter_key) ?? {};
+
+        let allowRe: RegExp | null =
           site.adapter_key === 'dcg' ? /\/competitions\//i :
           site.adapter_key === 'revcomps' ? /\/(product|competitions?)\//i :
           null;
-        if (defaultAllow) links = links.filter((u) => defaultAllow.test(u));
 
-        if (rules.link_allow_regex) {
-          const allow = new RegExp(rules.link_allow_regex, 'i');
-          links = links.filter((u) => allow.test(u));
-        }
-        if (rules.link_deny_regex) {
-          const deny = new RegExp(rules.link_deny_regex, 'i');
-          links = links.filter((u) => !deny.test(u));
-        }
+        const ruleAllow = parseRuleRegex(siteRules.link_allow_regex);
+        const ruleDeny  = parseRuleRegex(siteRules.link_deny_regex);
 
+        if (ruleAllow) allowRe = ruleAllow;
+        if (allowRe) links = links.filter((u) => allowRe!.test(u));
+        if (ruleDeny) links = links.filter((u) => !ruleDeny!.test(u));
+
+        // Extra DCG cleanup to avoid category pages
         if (site.adapter_key === 'dcg') {
           const denySlugs = new Set(['cash', 'cars', 'tech', 'instant', 'winners', 'draws', 'terms']);
           links = links.filter((u) => {
@@ -534,10 +541,17 @@ export async function POST(req: NextRequest) {
           });
         }
 
-        links = links.slice(0, 60);
-        console.log(`[scrape] ${site.name}: links found`, links.length);
+        // If nothing survived, fall back to default allow-only pass
+        if (!links.length) {
+          let fb = originalLinks;
+          if (allowRe) fb = fb.filter((u) => allowRe!.test(u));
+          links = fb;
+        }
 
-        const parseDetail = buildParser(site.adapter_key, rules);
+        links = links.slice(0, 60);
+        console.log(`[scrape] ${site.name}: links found ${links.length}`);
+
+        const parseDetail = buildParser(site.adapter_key, siteRules);
 
         for (const url of links) {
           if (seen.has(url)) continue;
