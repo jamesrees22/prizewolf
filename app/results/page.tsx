@@ -22,12 +22,15 @@ interface Competition {
   scraped_at: string | null;
 }
 
+type SortOption = 'odds_asc' | 'odds_desc' | 'entry_fee_asc' | 'entry_fee_desc';
+
 export default function ResultsPage() {
   const [results, setResults] = useState<Competition[]>([]);
   const [loading, setLoading] = useState(true);
   const [marking, setMarking] = useState<Record<UUID, boolean>>({});
   const [markedIds, setMarkedIds] = useState<Set<UUID>>(new Set());
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortOption>('odds_asc');
 
   const searchParams = useSearchParams();
   const query = searchParams.get('query') || '';
@@ -51,12 +54,22 @@ export default function ResultsPage() {
       const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
       const tier = session?.user?.user_metadata?.subscription_tier || 'free';
 
-      const { data, error } = await supabase
+      // Decide order column + direction
+      const [col, dir] =
+        sort === 'odds_asc' ? ['odds', true] :
+        sort === 'odds_desc' ? ['odds', false] :
+        sort === 'entry_fee_asc' ? ['entry_fee', true] :
+        ['entry_fee', false] as const;
+
+      let queryBuilder = supabase
         .from('competitions')
         .select('*')
         .ilike('prize', `%${query}%`)
-        .order('odds', { ascending: true })
+        .order(col, { ascending: dir, nullsFirst: true }) // keep nulls grouped
+        .order('prize', { ascending: true }) // stable secondary order
         .limit(tier === 'paid' ? 50 : 10);
+
+      const { data, error } = await queryBuilder;
 
       if (error) {
         console.error('Supabase SELECT error:', error);
@@ -69,7 +82,7 @@ export default function ResultsPage() {
     };
 
     fetchResults();
-  }, [query]);
+  }, [query, sort]);
 
   // After results load, fetch which of these have been marked by the current user
   useEffect(() => {
@@ -133,9 +146,27 @@ export default function ResultsPage() {
 
   return (
     <div className="min-h-screen bg-midnight-blue text-wolf-grey p-8">
-      <h1 className="text-3xl font-bold text-electric-gold mb-6">
-        Results for "{query}"
-      </h1>
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <h1 className="text-3xl font-bold text-electric-gold">
+          Results for "{query}"
+        </h1>
+
+        {/* Sort control */}
+        <div className="flex items-center gap-2">
+          <label htmlFor="sort" className="text-sm">Sort by:</label>
+          <select
+            id="sort"
+            value={sort}
+            onChange={(e) => setSort(e.target.value as SortOption)}
+            className="rounded-md bg-wolf-grey text-midnight-blue px-3 py-2 border border-wolf-grey/60"
+          >
+            <option value="odds_asc">Odds (best first)</option>
+            <option value="odds_desc">Odds (worst first)</option>
+            <option value="entry_fee_asc">Entry fee (low → high)</option>
+            <option value="entry_fee_desc">Entry fee (high → low)</option>
+          </select>
+        </div>
+      </div>
 
       {errorMsg && <p className="mb-4 text-neon-red">{errorMsg}</p>}
 
