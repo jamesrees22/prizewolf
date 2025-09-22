@@ -82,7 +82,7 @@ const computeRemaining = (total?: number | null, sold?: number | null) => {
   return r >= 0 ? r : null;
 };
 
-// ---------- price helpers ----------
+// ---------- PRICE: simple, robust pipeline (no hard cutoffs) ----------
 const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | null } => {
   const blocks = $('script[type="application/ld+json"]')
     .map((_, el) => $(el).contents().text())
@@ -121,53 +121,54 @@ const readMetaPrice = ($: CheerioAPI): number | null => {
   return null;
 };
 
-// Gather many candidates (rules + Woo + page text)
-const collectPriceCandidates = ($: CheerioAPI, rules?: any): number[] => {
-  const cands: number[] = [];
-  const uniqPush = (n: number | null) => { if (n != null && Number.isFinite(n)) cands.push(n); };
+// Try JSON-LD -> meta -> WooCommerce selectors -> body scan (0.01..100), pick lowest positive
+const extractPrice = ($: CheerioAPI, rules?: any): number | null => {
+  const ld = readJsonLdProduct($);
+  if (ld.price != null) return ld.price;
 
-  (rules?.price_selectors ?? []).forEach((sel: string) => {
-    uniqPush(toFloat($(sel).first().text()));
-  });
+  const meta = readMetaPrice($);
+  if (meta != null) return meta;
 
-  [
+  const trySelectors = (sels: string[]): number | null => {
+    for (const sel of sels) {
+      const n = toFloat($(sel).first().text());
+      if (n != null) return n;
+    }
+    return null;
+  };
+
+  // 1) site-provided selectors (if any)
+  const ruleSels: string[] = rules?.price_selectors ?? [];
+  const ruleHit = trySelectors(ruleSels);
+  if (ruleHit != null) return ruleHit;
+
+  // 2) common WooCommerce selectors
+  const wooHit = trySelectors([
     '.summary .price .amount',
     '.woocommerce-Price-amount',
     '.price .amount',
     '[class*="price"] .amount',
-  ].forEach((sel) => uniqPush(toFloat($(sel).first().text())));
+    '[class*="price"]',
+  ]);
+  if (wooHit != null) return wooHit;
 
+  // 3) last resort: body scan (keep within realistic range, but allow low-cost tickets)
   const body = $('body').text();
-  (body.match(/\b£?\s?(\d+(?:\.\d{1,2})?)\b/g) || [])
-    .forEach((m) => uniqPush(toFloat(m)));
+  const matches = body.match(/\b£?\s?(\d+(?:\.\d{1,2})?)\b/g) || [];
+  const nums = matches.map((m) => toFloat(m)).filter((n): n is number => n != null);
+  if (!nums.length) return null;
 
-  // Optional numeric range control from rules
-  const min: number | null = rules?.price_min ?? null;
-  const max: number | null = rules?.price_max ?? null;
-  return cands.filter((n) => (min == null || n >= min) && (max == null || n <= max));
+  // Use rules price_min/price_max if provided, else a broad default window
+  const min = rules?.price_min ?? 0.01;
+  const max = rules?.price_max ?? 100;
+  const plausible = nums.filter((v) => v >= min && v <= max);
+  if (!plausible.length) return null;
+
+  // choose the smallest plausible ticket price (typical UX shows base ticket)
+  return Math.min(...plausible);
 };
 
-// Choose the most likely ticket price
-// - If JSON-LD/meta provided -> trust it (any amount)
-// - Else choose the most frequent candidate
-// - If rules.prefer_smallest_price -> choose the smallest among top-frequency values
-const chooseBestPrice = (cands: number[], trusted?: number | null, rules?: any): number | null => {
-  if (trusted != null) return trusted;
-  if (!cands.length) return null;
-
-  const freq = new Map<number, number>();
-  for (const n of cands) freq.set(n, (freq.get(n) ?? 0) + 1);
-
-  const entries = [...freq.entries()].sort((a, b) => b[1] - a[1]); // by frequency desc
-  const topFreq = entries[0][1];
-  const topVals = entries.filter(([_, f]) => f === topFreq).map(([n]) => n);
-
-  if (rules?.prefer_smallest_price) return Math.min(...topVals);
-  // default: pick the first in frequency order (stable)
-  return topVals[0];
-};
-
-// ---------- totals extractors ----------
+// ---------- totals extractors (unchanged from your latest) ----------
 const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
 
@@ -208,7 +209,6 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   return { total, sold };
 };
 
-// Scan scripts & attributes for JSON-ish totals used by some sites
 const scanScriptsAndAttrsForTotals = ($: CheerioAPI, rules?: any) => {
   const scripts = $('script').map((_, el) => $(el).contents().text()).get().join('\n');
   const html = $.root().html() ?? '';
@@ -265,7 +265,6 @@ const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
   return { total, sold };
 };
 
-// DCG extractor (script/attr first, then text)
 const extractTotalsDCG = ($: CheerioAPI, rules?: any) => {
   const fromScripts = scanScriptsAndAttrsForTotals($, rules);
   if (fromScripts.total != null || fromScripts.sold != null || fromScripts.remaining != null) {
@@ -323,10 +322,11 @@ const buildParser = (adapter_key: string, rules?: any) => {
 
     if (!prize) return null;
 
-    // price
-    const metaPrice = readMetaPrice($);
-    const candidates = collectPriceCandidates($, rules);
-    const entry_fee = chooseBestPrice(candidates, ld.price ?? metaPrice ?? null, rules);
+    // PRICE (stabilised pipeline)
+    const entry_fee = extractPrice($, rules);
+    if (entry_fee == null) {
+      console.warn('[scrape] price not found; url=', url, 'site=', siteName);
+    }
 
     // totals
     let totals: { total: number | null; sold: number | null };
@@ -439,7 +439,14 @@ export async function POST(req: NextRequest) {
           )
         );
 
-        // Link filtering via adapter rules (standardised)
+        // Basic per-adapter link heuristics (rules can override later)
+        const defaultAllow =
+          site.adapter_key === 'dcg' ? /\/competitions\//i :
+          site.adapter_key === 'revcomps' ? /\/(product|competitions?)\//i :
+          null;
+        if (defaultAllow) links = links.filter((u) => defaultAllow.test(u));
+
+        // Rules-based allow/deny
         const rules = rulesMap.get(site.adapter_key) ?? {};
         if (rules.link_allow_regex) {
           const allow = new RegExp(rules.link_allow_regex, 'i');
@@ -448,14 +455,6 @@ export async function POST(req: NextRequest) {
         if (rules.link_deny_regex) {
           const deny = new RegExp(rules.link_deny_regex, 'i');
           links = links.filter((u) => !deny.test(u));
-        }
-
-        // Heuristics by adapter (defaults if no rules given)
-        if (!rules.link_allow_regex && site.adapter_key === 'dcg') {
-          links = links.filter((u) => /\/competitions\//i.test(u));
-        }
-        if (!rules.link_allow_regex && site.adapter_key === 'revcomps') {
-          links = links.filter((u) => /\/product\//i.test(u) || /\/competitions?\//i.test(u));
         }
 
         links = links.slice(0, 60);
