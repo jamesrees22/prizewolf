@@ -17,7 +17,7 @@ type ApiRow = {
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
-  remaining_tickets?: number | null; // computed/returned
+  remaining_tickets?: number | null; // computed/returned or parsed directly
   odds?: number | null;              // computed/returned only
   url: string;
   scraped_at?: string;
@@ -82,7 +82,7 @@ const computeRemaining = (total?: number | null, sold?: number | null) => {
   return r >= 0 ? r : null;
 };
 
-// ---------- PRICE: simple, robust pipeline (no hard cutoffs) ----------
+// ---------- PRICE helpers (robust, no hard cutoffs) ----------
 const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | null } => {
   const blocks = $('script[type="application/ld+json"]')
     .map((_, el) => $(el).contents().text())
@@ -104,9 +104,7 @@ const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | nul
           }
         }
       }
-    } catch {
-      // ignore malformed block
-    }
+    } catch { /* ignore */ }
   }
   return {};
 };
@@ -121,55 +119,69 @@ const readMetaPrice = ($: CheerioAPI): number | null => {
   return null;
 };
 
-// Try JSON-LD -> meta -> WooCommerce selectors -> body scan (0.01..100), pick lowest positive
-const extractPrice = ($: CheerioAPI, rules?: any): number | null => {
-  const ld = readJsonLdProduct($);
-  if (ld.price != null) return ld.price;
+// Collect many price candidates (selectors + WC + data + body)
+const collectPriceCandidates = ($: CheerioAPI, rules?: any): number[] => {
+  const cands: number[] = [];
+  const pushN = (n: number | null) => { if (n != null && Number.isFinite(n)) cands.push(n); };
 
-  const meta = readMetaPrice($);
-  if (meta != null) return meta;
+  // Site-provided selectors first
+  (rules?.price_selectors ?? []).forEach((sel: string) => pushN(toFloat($(sel).first().text())));
 
-  const trySelectors = (sels: string[]): number | null => {
-    for (const sel of sels) {
-      const n = toFloat($(sel).first().text());
-      if (n != null) return n;
-    }
-    return null;
-  };
-
-  // 1) site-provided selectors (if any)
-  const ruleSels: string[] = rules?.price_selectors ?? [];
-  const ruleHit = trySelectors(ruleSels);
-  if (ruleHit != null) return ruleHit;
-
-  // 2) common WooCommerce selectors
-  const wooHit = trySelectors([
+  // Common WooCommerce selectors
+  [
     '.summary .price .amount',
     '.woocommerce-Price-amount',
     '.price .amount',
     '[class*="price"] .amount',
-    '[class*="price"]',
-  ]);
-  if (wooHit != null) return wooHit;
+    '[class*="price"]'
+  ].forEach((sel) => pushN(toFloat($(sel).first().text())));
 
-  // 3) last resort: body scan (keep within realistic range, but allow low-cost tickets)
+  // data-* attributes that sometimes hold a price
+  $('[data-price], [data-entry-price], [data-price-per-entry], [data-ticket-price]').each((_, el) => {
+    pushN(toFloat($(el).attr('data-price')));
+    pushN(toFloat($(el).attr('data-entry-price')));
+    pushN(toFloat($(el).attr('data-price-per-entry')));
+    pushN(toFloat($(el).attr('data-ticket-price')));
+  });
+
+  // Whole-page text (last resort)
   const body = $('body').text();
   const matches = body.match(/\b£?\s?(\d+(?:\.\d{1,2})?)\b/g) || [];
-  const nums = matches.map((m) => toFloat(m)).filter((n): n is number => n != null);
-  if (!nums.length) return null;
+  matches.forEach((m) => pushN(toFloat(m)));
 
-  // Use rules price_min/price_max if provided, else a broad default window
-  const min = rules?.price_min ?? 0.01;
-  const max = rules?.price_max ?? 100;
-  const plausible = nums.filter((v) => v >= min && v <= max);
-  if (!plausible.length) return null;
-
-  // choose the smallest plausible ticket price (typical UX shows base ticket)
-  return Math.min(...plausible);
+  // Optional numeric range from rules
+  const min: number | null = rules?.price_min ?? 0.01;
+  const max: number | null = rules?.price_max ?? 100;
+  return cands.filter((n) => (min == null || n >= min) && (max == null || n <= max));
 };
 
-// ---------- totals extractors (unchanged from your latest) ----------
-const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
+// Choose the most likely ticket price
+// 1) If trusted (JSON-LD/meta) -> return it
+// 2) Prefer values within a "preference" range (adapter-rules) by frequency
+// 3) Else choose the most frequent overall
+const chooseBestPrice = (cands: number[], trusted?: number | null, rules?: any): number | null => {
+  if (trusted != null) return trusted;
+  if (!cands.length) return null;
+
+  const preferMin = rules?.price_prefer_min ?? 0.15;
+  const preferMax = rules?.price_prefer_max ?? 5.0;
+
+  const freq = (arr: number[]) => {
+    const m = new Map<number, number>();
+    arr.forEach((n) => m.set(n, (m.get(n) ?? 0) + 1));
+    return [...m.entries()].sort((a, b) => b[1] - a[1]); // by count desc
+  };
+
+  const preferred = cands.filter((n) => n >= preferMin && n <= preferMax);
+  const pick = (ents: [number, number][]) => ents.length ? ents[0][0] : null;
+
+  return pick(freq(preferred)) ?? pick(freq(cands));
+};
+
+// ---------- totals extractors ----------
+type Totals = { total: number | null; sold: number | null; remaining?: number | null };
+
+const extractTotalsGeneric = ($: CheerioAPI, rules?: any): Totals => {
   const text = $('body').text();
 
   const totalPats: string[] = rules?.total_patterns ?? [
@@ -192,7 +204,7 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
     const m = text.match(re);
     if (m) {
       total = toInt(m[2] ?? m[1]);
-      if (m[2]) sold = toInt(m[1]); // when pattern is sold/total
+      if (m[2]) sold = toInt(m[1]); // sold/total variant
       break;
     }
   }
@@ -209,7 +221,8 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   return { total, sold };
 };
 
-const scanScriptsAndAttrsForTotals = ($: CheerioAPI, rules?: any) => {
+// Scripts & attributes scan
+const scanScriptsAndAttrsForTotals = ($: CheerioAPI, rules?: any): Totals => {
   const scripts = $('script').map((_, el) => $(el).contents().text()).get().join('\n');
   const html = $.root().html() ?? '';
 
@@ -247,7 +260,7 @@ const scanScriptsAndAttrsForTotals = ($: CheerioAPI, rules?: any) => {
   return { total, sold, remaining };
 };
 
-const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
+const extractTotalsRevComps = ($: CheerioAPI, rules?: any): Totals => {
   const text = $('body').text();
   const maxPhrase = toInt(text.match(/\bPRIZE HAS A MAX OF\s*([\d,]+)\s*TICKETS\b/i)?.[1]);
   let sold = toInt(text.match(/\bSOLD:\s*([\d,]+)/i)?.[1]) ?? null;
@@ -262,20 +275,21 @@ const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
     total = g.total;
     if (sold == null) sold = g.sold;
   }
-  return { total, sold };
+  return { total, sold, remaining };
 };
 
-const extractTotalsDCG = ($: CheerioAPI, rules?: any) => {
+// DCG extractor (script/attr first, then text) — returns remaining too
+const extractTotalsDCG = ($: CheerioAPI, rules?: any): Totals => {
   const fromScripts = scanScriptsAndAttrsForTotals($, rules);
   if (fromScripts.total != null || fromScripts.sold != null || fromScripts.remaining != null) {
     const totalS = fromScripts.total;
     let soldS = fromScripts.sold;
     if (totalS != null && soldS != null && soldS > totalS) soldS = null;
-    return { total: totalS, sold: soldS };
+    return { total: totalS, sold: soldS, remaining: fromScripts.remaining ?? undefined };
   }
 
   const text = $('body').text();
-  const total =
+  let total =
     toInt(text.match(/\b([\d,]+)\s*entries\b/i)?.[1]) ??
     toInt(text.match(/\bmax(?:imum)?\s*(?:entries|tickets)?:?\s*([\d,]+)\b/i)?.[1]) ??
     toInt(text.match(/\btotal\s*(?:entries|tickets)?:?\s*([\d,]+)\b/i)?.[1]) ??
@@ -292,17 +306,15 @@ const extractTotalsDCG = ($: CheerioAPI, rules?: any) => {
     null;
 
   if (remaining != null && sold == null && total != null) sold = total - remaining;
-  if (total == null && remaining != null && sold != null) {
-    const t = remaining + sold;
-    if (t > 0) return { total: t, sold };
-  }
+  if (total == null && remaining != null && sold != null) total = remaining + sold;
 
   if (total != null && sold != null && sold > total) sold = null;
   if (total == null) {
     const g = extractTotalsGeneric($, rules);
-    return { total: g.total, sold: sold ?? g.sold };
+    total = g.total;
+    if (sold == null) sold = g.sold;
   }
-  return { total, sold };
+  return { total, sold, remaining };
 };
 
 // ---------- parser factory ----------
@@ -322,14 +334,16 @@ const buildParser = (adapter_key: string, rules?: any) => {
 
     if (!prize) return null;
 
-    // PRICE (stabilised pipeline)
-    const entry_fee = extractPrice($, rules);
+    // PRICE (trust JSON-LD/meta -> most-common candidate, prefer 0.15–5 if available)
+    const metaPrice = readMetaPrice($);
+    const candPrices = collectPriceCandidates($, rules);
+    const entry_fee = chooseBestPrice(candPrices, ld.price ?? metaPrice ?? null, rules);
     if (entry_fee == null) {
       console.warn('[scrape] price not found; url=', url, 'site=', siteName);
     }
 
-    // totals
-    let totals: { total: number | null; sold: number | null };
+    // TOTALS (now includes remaining)
+    let totals: Totals;
     switch (adapter_key) {
       case 'revcomps':
         totals = extractTotalsRevComps($, rules);
@@ -343,12 +357,15 @@ const buildParser = (adapter_key: string, rules?: any) => {
         break;
     }
 
+    const remaining_final = totals.remaining ?? computeRemaining(totals.total, totals.sold);
+
     return {
       prize,
       site_name: siteName,
       entry_fee,
       total_tickets: totals.total,
       tickets_sold: totals.sold,
+      remaining_tickets: remaining_final ?? undefined,
       url,
     };
   };
@@ -439,15 +456,17 @@ export async function POST(req: NextRequest) {
           )
         );
 
-        // Basic per-adapter link heuristics (rules can override later)
+        // Default per-adapter link heuristics + rules allow/deny
+        const rules = rulesMap.get(site.adapter_key) ?? {};
+
+        // default adapter allow
         const defaultAllow =
           site.adapter_key === 'dcg' ? /\/competitions\//i :
           site.adapter_key === 'revcomps' ? /\/(product|competitions?)\//i :
           null;
         if (defaultAllow) links = links.filter((u) => defaultAllow.test(u));
 
-        // Rules-based allow/deny
-        const rules = rulesMap.get(site.adapter_key) ?? {};
+        // rules allow/deny
         if (rules.link_allow_regex) {
           const allow = new RegExp(rules.link_allow_regex, 'i');
           links = links.filter((u) => allow.test(u));
@@ -455,6 +474,19 @@ export async function POST(req: NextRequest) {
         if (rules.link_deny_regex) {
           const deny = new RegExp(rules.link_deny_regex, 'i');
           links = links.filter((u) => !deny.test(u));
+        }
+
+        // Remove obvious DCG category pages like /competitions/cash, /competitions/instant etc.
+        if (site.adapter_key === 'dcg') {
+          const denySlugs = new Set(['cash', 'cars', 'tech', 'instant', 'winners', 'draws', 'terms']);
+          links = links.filter((u) => {
+            const m = u.match(/\/competitions\/([^/?#]+)/i);
+            if (!m) return false;
+            const slug = m[1].toLowerCase();
+            if (denySlugs.has(slug)) return false;
+            // require a more specific slug (hyphen or digits), avoids bare category pages
+            return /[-\d]/.test(slug);
+          });
         }
 
         links = links.slice(0, 60);
@@ -474,16 +506,18 @@ export async function POST(req: NextRequest) {
             if (query && !parsed.prize.toLowerCase().includes(query.toLowerCase())) continue;
 
             const scraped_at = new Date().toISOString();
-            const remaining_tickets = computeRemaining(parsed.total_tickets, parsed.tickets_sold);
-            const odds = parsed.total_tickets ?? null;
 
             // API row (includes computed fields)
             const apiRow: ApiRow = {
               ...parsed,
               scraped_at,
-              remaining_tickets,
-              odds,
+              odds: parsed.total_tickets ?? null,
+              // remaining_tickets may already be set from the parser
             };
+            // ensure remaining_tickets present if can be derived
+            if (apiRow.remaining_tickets == null) {
+              apiRow.remaining_tickets = computeRemaining(apiRow.total_tickets, apiRow.tickets_sold) ?? undefined;
+            }
             apiRows.push(apiRow);
 
             // DB row (excludes generated fields)
