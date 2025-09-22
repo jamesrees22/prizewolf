@@ -15,10 +15,10 @@ interface Competition {
   prize: string;
   site_name: string;
   entry_fee: number | null;
-  total_tickets: number | null;
+  total_tickets: number | null;      // <-- used for "Odds (1 in X)"
   tickets_sold: number | null;
-  remaining_tickets: number | null; // <-- NEW from DB generated column
-  odds: number | null;              // "1 in N" (we treat as remaining N for formatting)
+  remaining_tickets: number | null;  // generated column in DB
+  odds: number | null;               // keep for compatibility, but not used for display now
   url: string;
   scraped_at: string | null;
 }
@@ -44,8 +44,9 @@ export default function ResultsPage() {
   const fmtMoney = (n: number | null | undefined) =>
     n == null ? 'N/A' : `£${n.toFixed(2)}`;
 
-  const fmtOdds = (n: number | null | undefined) =>
-    n == null ? 'N/A' : `1 in ${n.toLocaleString('en-GB')}`;
+  // "Odds" now means 1 in TOTAL tickets
+  const fmtOdds = (total: number | null | undefined) =>
+    total == null ? 'N/A' : `1 in ${total.toLocaleString('en-GB')}`;
 
   useEffect(() => {
     const fetchResults = async () => {
@@ -55,10 +56,10 @@ export default function ResultsPage() {
       const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
       const tier = session?.user?.user_metadata?.subscription_tier || 'free';
 
-      // Decide order column + direction
+      // Map sort: "odds" sorts by total_tickets (lower total = better odds)
       const [col, dir] =
-        sort === 'odds_asc' ? ['odds', true] :
-        sort === 'odds_desc' ? ['odds', false] :
+        sort === 'odds_asc' ? ['total_tickets', true] :
+        sort === 'odds_desc' ? ['total_tickets', false] :
         sort === 'entry_fee_asc' ? ['entry_fee', true] :
         ['entry_fee', false] as const;
 
@@ -66,7 +67,7 @@ export default function ResultsPage() {
         .from('competitions')
         .select('*')
         .ilike('prize', `%${query}%`)
-        .order(col, { ascending: dir, nullsFirst: true }) // keep nulls grouped
+        .order(col, { ascending: dir, nullsFirst: true })
         .order('prize', { ascending: true }) // stable secondary order
         .limit(tier === 'paid' ? 50 : 10);
 
@@ -126,7 +127,6 @@ export default function ResultsPage() {
         .insert([{ user_id, competition_id: competitionId }]);
 
       if (error) {
-        // 23505 = unique_violation (already marked)
         if ((error as any).code === '23505') {
           setMarkedIds(prev => new Set(prev).add(competitionId));
         } else {
@@ -179,8 +179,8 @@ export default function ResultsPage() {
             <tr className="bg-electric-gold text-midnight-blue">
               <th className="p-2 text-left">Prize</th>
               <th className="p-2 text-left">Site</th>
-              <th className="p-2 text-right">Odds</th>
-              <th className="p-2 text-right">Remaining</th>
+              <th className="p-2 text-right">Odds</th>        {/* 1 in total */}
+              <th className="p-2 text-right">Remaining</th>   {/* tickets left */}
               <th className="p-2 text-right">Entry Fee</th>
               <th className="p-2 text-center">Link</th>
               <th className="p-2 text-center">Action</th>
@@ -195,7 +195,7 @@ export default function ResultsPage() {
                 <tr key={comp.id} className="border-b border-wolf-grey hover:bg-neon-red hover:text-white">
                   <td className="p-2">{comp.prize}</td>
                   <td className="p-2">{comp.site_name}</td>
-                  <td className="p-2 text-right">{fmtOdds(comp.odds)}</td>
+                  <td className="p-2 text-right">{fmtOdds(comp.total_tickets)}</td>
                   <td className="p-2 text-right">{fmtInt(comp.remaining_tickets)}</td>
                   <td className="p-2 text-right">{fmtMoney(comp.entry_fee ?? null)}</td>
                   <td className="p-2 text-center">
