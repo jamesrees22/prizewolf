@@ -20,10 +20,13 @@ type Row = {
   scraped_at?: string;
 };
 
-type ApiRow = Row & { remaining_tickets: number | null };
+type AdapterRules = {
+  adapter_key: string;
+  rules: any;
+};
 
-// Config records from DB
 type SiteCfg = {
+  id: string;                // <-- added
   name: string;
   list_url: string;
   link_selector: string;
@@ -31,11 +34,6 @@ type SiteCfg = {
   rate_limit_ms: number | null;
   tier: 'free' | 'premium' | 'both';
   enabled: boolean;
-};
-
-type AdapterRules = {
-  adapter_key: string;
-  rules: any; // JSON rules structure (see seed)
 };
 
 const UA =
@@ -56,30 +54,34 @@ const toFloat = (s?: string | null): number | null => {
   const n = parseFloat(s.replace(/[^\d.]/g, ''));
   return Number.isFinite(n) ? n : null;
 };
+
 const toInt = (s?: string | null): number | null => {
   if (!s) return null;
   const n = parseInt(s.replace(/[^\d]/g, ''), 10);
   return Number.isFinite(n) ? n : null;
 };
-const computeRemaining = (total: number | null, sold: number | null): number | null => {
-  if (total == null) return null;
-  const rem = total - (sold ?? 0);
-  return rem >= 0 ? rem : null;
+
+const computeRemaining = (total?: number | null, sold?: number | null) => {
+  if (total == null || sold == null) return null;
+  const r = total - sold;
+  return r >= 0 ? r : null;
 };
 
-// Ticket price: pick the smallest plausible amount (avoid cash-alts/prize values)
-const extractTicketPrice = ($: CheerioAPI, rules?: any): number | null => {
-  const text = $('body').text();
-  const patterns: RegExp[] = (rules?.price_patterns ?? ['£\\s*([\\d.,]+)'])
-    .map((p: string) => new RegExp(p, 'g'));
-
-  const nums: number[] = [];
-  for (const rx of patterns) {
-    for (const m of text.matchAll(rx)) {
-      const v = toFloat((m as any)[1]);
-      if (v != null) nums.push(v);
-    }
+const parsePrice = ($: CheerioAPI, rules?: any) => {
+  // Try rule-based selectors first
+  const priceSelectors: string[] = rules?.price_selectors ?? [];
+  for (const sel of priceSelectors) {
+    const text = $(sel).first().text();
+    const n = toFloat(text);
+    if (n != null) return n;
   }
+  // Fallback: pick plausible £ values in body text
+  const body = $('body').text();
+  const matches = body.match(/\b£?\s?(\d+(?:\.\d{1,2})?)\b/g) || [];
+  const nums = matches
+    .map((m) => toFloat(m))
+    .filter((n): n is number => n != null);
+  if (nums.length === 0) return null;
 
   const min = rules?.price_window?.min ?? 0.1;
   const max = rules?.price_window?.max ?? 50;
@@ -94,25 +96,36 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
 
   const totalPatterns: RegExp[] = (rules?.total_patterns ?? [
     'Number of Tickets\\s*([\\d,]+)',
-    'max of\\s*([\\d,]+)\\s*tickets',
-    '([\\d,]+)\\s*entries',
+    'Max Tickets\\s*([\\d,]+)',
+    'Maximum Tickets\\s*([\\d,]+)',
+    'Tickets Available\\s*([\\d,]+)\\s*/\\s*([\\d,]+)',
   ]).map((p: string) => new RegExp(p, 'i'));
 
   const soldPatterns: RegExp[] = (rules?.sold_patterns ?? [
-    'Tickets?\\s*sold\\s*([\\d,]+)',
-    'Sold:\\s*([\\d,]+)',
+    '\\bSold\\s*:\\s*([\\d,]+)\\b',
+    '\\b([\\d,]+)\\s*sold\\b',
   ]).map((p: string) => new RegExp(p, 'i'));
 
   let total: number | null = null;
-  for (const rx of totalPatterns) {
-    const m = text.match(rx);
-    if (m?.[1]) { total = toInt(m[1]); break; }
+  let sold: number | null = null;
+
+  for (const re of totalPatterns) {
+    const m = text.match(re);
+    if (m) {
+      total = toInt(m[2] ?? m[1]);
+      if (m[2]) sold = toInt(m[1]); // when pattern includes sold/total
+      break;
+    }
   }
 
-  let sold: number | null = null;
-  for (const rx of soldPatterns) {
-    const m = text.match(rx);
-    if (m?.[1]) { sold = toInt(m[1]); break; }
+  if (sold == null) {
+    for (const re of soldPatterns) {
+      const m = text.match(re);
+      if (m) {
+        sold = toInt(m[1]);
+        break;
+      }
+    }
   }
 
   if (total != null && sold != null && sold > total) sold = null;
@@ -144,39 +157,40 @@ const extractTotalsDCG = ($: CheerioAPI) => {
   const text = $('body').text();
 
   const remaining = toInt(text.match(/\bremaining:\s*([\d,]+)\b/i)?.[1]) ?? null;
-  let sold =
-    toInt(text.match(/\b(?:tickets?|entries?)\s*sold\s*([\d,]+)\b/i)?.[1]) ??
-    toInt(text.match(/\bsold:\s*([\d,]+)\b/i)?.[1]) ??
-    null;
+  const sold = toInt(text.match(/\bsold:\s*([\d,]+)\b/i)?.[1]) ?? null;
 
-  let total =
-    toInt(text.match(/\bmax(?:imum)?\s+(?:entries|tickets)\b[^\d]*([\d,]+)\b/i)?.[1]) ??
-    toInt(text.match(/\btotal\s+(?:entries|tickets)\b[^\d]*([\d,]+)\b/i)?.[1]) ??
-    null;
+  let total = toInt(text.match(/\bmax(?:imum)?\s*tickets?:?\s*([\d,]+)\b/i)?.[1]) ?? null;
+  if (total == null && sold != null && remaining != null) total = sold + remaining;
+  if (total != null && sold != null && sold > total) return { total, sold: null };
 
   if (total == null) {
-    const m = text.match(/\b([\d,]+)\s*entries\b/i);
-    if (m?.[1]) total = toInt(m[1]);
+    const g = extractTotalsGeneric($);
+    total = g.total;
   }
-
-  if (total == null && sold != null && remaining != null) total = sold + remaining;
-  if (total != null && sold != null && sold > total) sold = null;
-
   return { total, sold };
 };
-// -----------------------------
 
-// Build a site-specific parser based on adapter_key + rules
-const buildParser = (adapterKey: string, rules?: any) => {
+const buildParser = (adapter_key: string, rules?: any) => {
   return (html: string, url: string, siteName: string): Row | null => {
     const $ = load(html);
-    const prize = $('h1, h2').first().text().trim();
+
+    // Prize (rules or common selectors)
+    const prize =
+      $(rules?.prize_selectors?.join(',') ?? '').first().text().trim() ||
+      $('h1, h2.product_title, .woocommerce-loop-product__title').first().text().trim() ||
+      $('[class*="prize"]').first().text().trim();
+
     if (!prize) return null;
 
-    const entry_fee = extractTicketPrice($, rules);
+    // Price
+    const entry_fee =
+      parsePrice($, rules) ??
+      toFloat($('.price').first().text()) ??
+      toFloat($('[class*="price"]').first().text());
 
+    // Totals
     let totals: { total: number | null; sold: number | null };
-    switch (adapterKey) {
+    switch (adapter_key) {
       case 'revcomps':
         totals = extractTotalsRevComps($, rules);
         break;
@@ -210,7 +224,7 @@ export async function POST(req: NextRequest) {
     // Load enabled sites (respect tier)
     const { data: sitesData, error: sitesErr } = await supabase
       .from('sites')
-      .select('name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled')
+      .select('id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled') // <-- id added
       .eq('enabled', true);
 
     if (sitesErr) throw sitesErr;
@@ -234,12 +248,26 @@ export async function POST(req: NextRequest) {
     const rulesMap = new Map<string, any>();
     (rulesData ?? []).forEach((r: AdapterRules) => rulesMap.set(r.adapter_key, r.rules));
 
+    const apiRows: Row[] = [];
     const upsertRows: Row[] = [];
-    const apiRows: ApiRow[] = [];
     const seen = new Set<string>();
 
+    // Process each site with its own scrape_run
     for (const site of siteRows) {
+      // 1) Create the run (started)
+      const { data: runStart, error: runErr } = await supabase
+        .from('scrape_runs')
+        .insert({ site_id: site.id, status: 'started' })
+        .select('id')
+        .single();
+
+      const runId = runStart?.id as number | undefined;
+
+      // Keep track of per-site upserts
+      const upsertsBefore = upsertRows.length;
+
       try {
+        // 2) Scrape list page
         const listHtml = await fetchHtml(site.list_url);
         const $ = load(listHtml);
 
@@ -273,30 +301,77 @@ export async function POST(req: NextRequest) {
 
             const row: Row = { ...parsed, scraped_at };
             upsertRows.push(row);
+            apiRows.push({
+              ...row,
+              // ensure remaining and odds fields exist in your table schema
+              // (you already have them as nullable columns)
+            });
 
-            const apiRow: ApiRow = { ...row, remaining_tickets };
-            apiRows.push(apiRow);
-
-            const pause = site.rate_limit_ms ?? 250;
-            await new Promise((r) => setTimeout(r, pause));
+            if (site.rate_limit_ms) {
+              await new Promise((res) => setTimeout(res, site.rate_limit_ms!));
+            }
           } catch (e) {
-            console.warn(`Detail parse failed for ${site.name}: ${url}`, e);
+            // Skip bad detail pages, continue with other links
+            continue;
           }
         }
-      } catch (e) {
-        console.error(`List fetch failed for ${site.name}`, e);
+
+        // 3) Upsert (global, but we'll count how many this site contributed)
+        if (upsertRows.length > upsertsBefore) {
+          const { error } = await supabase
+            .from('competitions')
+            .upsert(upsertRows, { onConflict: 'url', ignoreDuplicates: false })
+            .select();
+          if (error) {
+            console.error('Supabase upsert error:', error);
+            // Mark this site's run as error
+            if (runId) {
+              await supabase
+                .from('scrape_runs')
+                .update({
+                  status: 'error',
+                  finished_at: new Date().toISOString(),
+                  error: error.message,
+                })
+                .eq('id', runId);
+            }
+            // Continue to next site rather than failing entire request
+            continue;
+          }
+        }
+
+        // 4) Mark run ok
+        const siteCount = upsertRows.length - upsertsBefore;
+        if (runId) {
+          await supabase
+            .from('scrape_runs')
+            .update({
+              status: 'ok',
+              items_ingested: siteCount,
+              finished_at: new Date().toISOString(),
+            })
+            .eq('id', runId);
+        }
+      } catch (siteErr: any) {
+        // Mark this site's run as error
+        if (runId) {
+          await supabase
+            .from('scrape_runs')
+            .update({
+              status: 'error',
+              finished_at: new Date().toISOString(),
+              error: String(siteErr?.message ?? siteErr),
+            })
+            .eq('id', runId);
+        }
+        // Continue with other sites
+        continue;
       }
     }
 
+    // If anything was found, return it
     if (upsertRows.length) {
-      const { error } = await supabase
-        .from('competitions')
-        .upsert(upsertRows, { onConflict: 'url', ignoreDuplicates: false })
-        .select();
-      if (error) {
-        console.error('Supabase upsert error:', error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
-      }
+      // (Already upserted above; nothing to do here)
     }
 
     return NextResponse.json(apiRows, { status: 200 });
