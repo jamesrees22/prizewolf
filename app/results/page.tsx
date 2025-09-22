@@ -15,10 +15,10 @@ interface Competition {
   prize: string;
   site_name: string;
   entry_fee: number | null;
-  total_tickets: number | null;      // <-- used for "Odds (1 in X)"
+  total_tickets: number | null;      // used for "Odds (1 in X)"
   tickets_sold: number | null;
   remaining_tickets: number | null;  // generated column in DB
-  odds: number | null;               // keep for compatibility, but not used for display now
+  odds: number | null;               // legacy/compat
   url: string;
   scraped_at: string | null;
 }
@@ -37,14 +37,13 @@ export default function ResultsPage() {
   const query = searchParams.get('query') || '';
   const router = useRouter();
 
-  // helpers
+  // formatters
   const fmtInt = (n: number | null | undefined) =>
     n == null ? 'N/A' : n.toLocaleString('en-GB');
 
   const fmtMoney = (n: number | null | undefined) =>
     n == null ? 'N/A' : `£${n.toFixed(2)}`;
 
-  // "Odds" now means 1 in TOTAL tickets
   const fmtOdds = (total: number | null | undefined) =>
     total == null ? 'N/A' : `1 in ${total.toLocaleString('en-GB')}`;
 
@@ -56,7 +55,7 @@ export default function ResultsPage() {
       const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
       const tier = session?.user?.user_metadata?.subscription_tier || 'free';
 
-      // Map sort: "odds" sorts by total_tickets (lower total = better odds)
+      // "odds" sorts by total_tickets (lower total = better odds)
       const [col, dir] =
         sort === 'odds_asc' ? ['total_tickets', true] :
         sort === 'odds_desc' ? ['total_tickets', false] :
@@ -68,7 +67,7 @@ export default function ResultsPage() {
         .select('*')
         .ilike('prize', `%${query}%`)
         .order(col, { ascending: dir, nullsFirst: true })
-        .order('prize', { ascending: true }) // stable secondary order
+        .order('prize', { ascending: true })
         .limit(tier === 'paid' ? 50 : 10);
 
       if (error) {
@@ -84,7 +83,6 @@ export default function ResultsPage() {
     fetchResults();
   }, [query, sort]);
 
-  // After results load, fetch which of these have been marked by the current user
   useEffect(() => {
     const preloadMarked = async () => {
       if (results.length === 0) {
@@ -112,20 +110,16 @@ export default function ResultsPage() {
   const handleMarkEntered = async (competitionId: UUID) => {
     setErrorMsg(null);
     setMarking(prev => ({ ...prev, [competitionId]: true }));
-
     try {
       const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
       if (!session) {
         router.push('/auth');
         return;
       }
-
       const user_id = session.user.id as UUID;
-
       const { error } = await supabase
         .from('user_entries')
         .insert([{ user_id, competition_id: competitionId }]);
-
       if (error) {
         if ((error as any).code === '23505') {
           setMarkedIds(prev => new Set(prev).add(competitionId));
@@ -143,6 +137,17 @@ export default function ResultsPage() {
 
   const rows = useMemo(() => results, [results]);
 
+  // Header cells mapped to avoid whitespace text nodes inside <tr>
+  const tableHeaders = [
+    { key: 'prize',      label: 'Prize',       align: 'text-left'  },
+    { key: 'site',       label: 'Site',        align: 'text-left'  },
+    { key: 'odds',       label: 'Odds',        align: 'text-right' },
+    { key: 'remaining',  label: 'Remaining',   align: 'text-right' },
+    { key: 'fee',        label: 'Entry Fee',   align: 'text-right' },
+    { key: 'link',       label: 'Link',        align: 'text-center'},
+    { key: 'action',     label: 'Action',      align: 'text-center'},
+  ] as const;
+
   return (
     <div className="min-h-screen bg-midnight-blue text-wolf-grey p-8">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -150,7 +155,6 @@ export default function ResultsPage() {
           Results for "{query}"
         </h1>
 
-        {/* Sort control */}
         <div className="flex items-center gap-2">
           <label htmlFor="sort" className="text-sm">Sort by:</label>
           <select
@@ -177,13 +181,9 @@ export default function ResultsPage() {
         <table className="w-full border-collapse border border-wolf-grey">
           <thead>
             <tr className="bg-electric-gold text-midnight-blue">
-              <th className="p-2 text-left">Prize</th>
-              <th className="p-2 text-left">Site</th>
-              <th className="p-2 text-right">Odds</th>        {/* 1 in total */}
-              <th className="p-2 text-right">Remaining</th>   {/* tickets left */}
-              <th className="p-2 text-right">Entry Fee</th>
-              <th className="p-2 text-center">Link</th>
-              <th className="p-2 text-center">Action</th>
+              {tableHeaders.map(h => (
+                <th key={h.key} className={`p-2 ${h.align}`}>{h.label}</th>
+              ))}
             </tr>
           </thead>
           <tbody>
