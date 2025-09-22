@@ -10,7 +10,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY as string
 );
 
-// What we return to the client (can include computed fields)
+// ---------- types ----------
 type ApiRow = {
   prize: string;
   site_name: string;
@@ -23,7 +23,7 @@ type ApiRow = {
   scraped_at?: string;
 };
 
-// What we write to DB (exclude generated columns like `odds`, `remaining_tickets`)
+// DB payload — exclude generated cols like `odds` and `remaining_tickets`
 type DbRow = {
   prize: string;
   site_name: string;
@@ -50,6 +50,7 @@ type SiteCfg = {
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
 
+// ---------- fetch helper ----------
 const fetchHtml = async (url: string): Promise<string> => {
   const res = await fetch(url, {
     headers: { 'User-Agent': UA, 'Accept-Language': 'en-GB,en;q=0.9' },
@@ -59,7 +60,7 @@ const fetchHtml = async (url: string): Promise<string> => {
   return res.text();
 };
 
-// ---------- helpers ----------
+// ---------- utils ----------
 const sleep = (ms?: number | null) =>
   ms && ms > 0 ? new Promise<void>((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 
@@ -81,6 +82,38 @@ const computeRemaining = (total?: number | null, sold?: number | null) => {
   return r >= 0 ? r : null;
 };
 
+// --- JSON-LD Product reader for precise name/price ---
+const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | null } => {
+  const blocks = $('script[type="application/ld+json"]')
+    .map((_, el) => $(el).contents().text())
+    .get();
+
+  for (const raw of blocks) {
+    try {
+      const data = JSON.parse(raw);
+      const arr = Array.isArray(data) ? data : [data];
+      for (const node of arr) {
+        const graph = Array.isArray(node?.['@graph']) ? node['@graph'] : [node];
+        for (const g of graph) {
+          const typeArr = g?.['@type']
+            ? (Array.isArray(g['@type']) ? g['@type'] : [g['@type']])
+            : [];
+          if (typeArr.includes('Product')) {
+            const offers = Array.isArray(g.offers) ? g.offers[0] : g.offers;
+            const price = offers?.price ? Number(String(offers.price).replace(/[^\d.]/g, '')) : null;
+            const name = typeof g.name === 'string' ? g.name.trim() : undefined;
+            if (name || price != null) return { name, price: price ?? null };
+          }
+        }
+      }
+    } catch {
+      // ignore malformed blocks
+    }
+  }
+  return {};
+};
+
+// Price fallback when JSON-LD missing
 const parsePrice = ($: CheerioAPI, rules?: any) => {
   const priceSelectors: string[] = rules?.price_selectors ?? [];
   for (const sel of priceSelectors) {
@@ -88,6 +121,13 @@ const parsePrice = ($: CheerioAPI, rules?: any) => {
     const n = toFloat(text);
     if (n != null) return n;
   }
+  // WooCommerce common nodes
+  const wc =
+    toFloat($('.price .amount').first().text()) ??
+    toFloat($('.woocommerce-Price-amount').first().text());
+  if (wc != null) return wc;
+
+  // Last-resort text scan (bounded window)
   const body = $('body').text();
   const matches = body.match(/\b£?\s?(\d+(?:\.\d{1,2})?)\b/g) || [];
   const nums = matches.map((m) => toFloat(m)).filter((n): n is number => n != null);
@@ -100,7 +140,7 @@ const parsePrice = ($: CheerioAPI, rules?: any) => {
   return Math.min(...plausible);
 };
 
-// Generic totals extractor
+// ---------- totals extractors ----------
 const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
 
@@ -123,7 +163,7 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
     const m = text.match(re);
     if (m) {
       total = toInt(m[2] ?? m[1]);
-      if (m[2]) sold = toInt(m[1]);
+      if (m[2]) sold = toInt(m[1]); // sold/total variant
       break;
     }
   }
@@ -161,37 +201,62 @@ const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
   return { total, sold };
 };
 
+// Broadened Dream Car Giveaways extractor
 const extractTotalsDCG = ($: CheerioAPI) => {
   const text = $('body').text();
 
-  const remaining = toInt(text.match(/\bremaining:\s*([\d,]+)\b/i)?.[1]) ?? null;
-  const sold = toInt(text.match(/\bsold:\s*([\d,]+)\b/i)?.[1]) ?? null;
+  const remaining =
+    toInt(text.match(/\bentries?\s*remaining:\s*([\d,]+)\b/i)?.[1]) ??
+    toInt(text.match(/\btickets?\s*remaining:\s*([\d,]+)\b/i)?.[1]) ??
+    toInt(text.match(/\bremaining\s*entries?:\s*([\d,]+)\b/i)?.[1]) ??
+    toInt(text.match(/\bremaining:\s*([\d,]+)\b/i)?.[1]) ??
+    null;
 
-  let total = toInt(text.match(/\bmax(?:imum)?\s*tickets?:?\s*([\d,]+)\b/i)?.[1]) ?? null;
+  let sold =
+    toInt(text.match(/\bentries?\s*sold:\s*([\d,]+)\b/i)?.[1]) ??
+    toInt(text.match(/\btickets?\s*sold:\s*([\d,]+)\b/i)?.[1]) ??
+    toInt(text.match(/\b([\d,]+)\s*sold\b/i)?.[1]) ??
+    null;
+
+  let total =
+    toInt(text.match(/\bmax(?:imum)?\s*(?:entries|tickets)?:?\s*([\d,]+)\b/i)?.[1]) ??
+    toInt(text.match(/\btotal\s*(?:entries|tickets)?:?\s*([\d,]+)\b/i)?.[1]) ??
+    null;
+
   if (total == null && sold != null && remaining != null) total = sold + remaining;
-  if (total != null && sold != null && sold > total) return { total, sold: null };
+  if (total != null && sold != null && sold > total) sold = null;
 
   if (total == null) {
     const g = extractTotalsGeneric($);
     total = g.total;
+    if (sold == null) sold = g.sold;
   }
   return { total, sold };
 };
 
+// ---------- parser factory ----------
 const buildParser = (adapter_key: string, rules?: any) => {
   return (html: string, url: string, siteName: string): ApiRow | null => {
     const $ = load(html);
 
+    const ld = readJsonLdProduct($);
+
     const prize =
+      ld.name ||
       $(rules?.prize_selectors?.join(',') ?? '').first().text().trim() ||
       $('h1, h2.product_title, .woocommerce-loop-product__title').first().text().trim() ||
-      $('[class*="prize"]').first().text().trim();
+      $('[class*="prize"]').first().text().trim() ||
+      $('meta[property="og:title"]').attr('content')?.trim() ||
+      $('title').text().trim();
 
     if (!prize) return null;
 
     const entry_fee =
-      parsePrice($, rules) ??
-      toFloat($('.price').first().text()) ??
+      (ld.price != null ? ld.price : null) ||
+      parsePrice($, rules) ||
+      toFloat($('.price .amount').first().text()) ||
+      toFloat($('.woocommerce-Price-amount').first().text()) ||
+      toFloat($('.price').first().text()) ||
       toFloat($('[class*="price"]').first().text());
 
     let totals: { total: number | null; sold: number | null };
@@ -219,11 +284,11 @@ const buildParser = (adapter_key: string, rules?: any) => {
   };
 };
 
-// --- new: robust site loader with fallback + logging ---
+// ---------- site loader with fallback + logging ----------
 async function loadSites(userTier: 'free' | 'premium' | 'both') {
   const baseSel = 'id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled';
 
-  // First try enabled=true
+  // Primary: enabled=true
   let { data, error } = await supabase
     .from('sites')
     .select(baseSel)
@@ -232,7 +297,7 @@ async function loadSites(userTier: 'free' | 'premium' | 'both') {
   if (error) throw error;
   let rows = (data ?? []) as SiteCfg[];
 
-  // If none found, fallback to all (helps when enabled flags are not set yet)
+  // Fallback: all sites
   if (!rows.length) {
     const retry = await supabase.from('sites').select(baseSel);
     if (retry.error) throw retry.error;
@@ -254,6 +319,7 @@ async function loadSites(userTier: 'free' | 'premium' | 'both') {
   return filtered;
 }
 
+// ---------- HTTP handler ----------
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({} as any));
@@ -329,7 +395,7 @@ export async function POST(req: NextRequest) {
             };
             apiRows.push(apiRow);
 
-            // DB row (excludes generated fields like `odds`)
+            // DB row (excludes generated fields)
             const dbRow: DbRow = {
               prize: apiRow.prize,
               site_name: apiRow.site_name,
@@ -339,7 +405,6 @@ export async function POST(req: NextRequest) {
               url: apiRow.url,
               scraped_at: apiRow.scraped_at,
             };
-
             dbRows.push(dbRow);
 
             await sleep(site.rate_limit_ms);
