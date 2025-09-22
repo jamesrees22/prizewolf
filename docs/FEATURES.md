@@ -38,6 +38,10 @@ Use it as a living backlog. Update frequently!
 - [ ] Add dark mode toggle / theme switcher in UI
 - [ ] Build `/api/debug-sites` for quick Supabase connectivity tests
 - [ ] Public roadmap page: show features + allow votes (powered by Supabase table)
+- [ ] **Expected Value (EV) calculation**
+- Add `prize_value` column (scraped/estimated)
+- Generate `ev_total` (1 / total tickets) and `ev_sold` (1 / tickets sold)
+- Show in results table with optional sorting
 
 ---
 
