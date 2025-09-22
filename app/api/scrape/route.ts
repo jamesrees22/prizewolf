@@ -17,13 +17,12 @@ type ApiRow = {
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
-  remaining_tickets?: number | null; // computed/returned or parsed directly
+  remaining_tickets?: number | null; // computed/returned
   odds?: number | null;              // computed/returned only
   url: string;
   scraped_at?: string;
 };
 
-// DB payload — exclude generated cols like `odds` and `remaining_tickets`
 type DbRow = {
   prize: string;
   site_name: string;
@@ -41,7 +40,7 @@ type SiteCfg = {
   name: string;
   list_url: string;
   link_selector: string;
-  adapter_key: string; // 'revcomps' | 'dcg' | 'generic'
+  adapter_key: string; // 'revcomps' | 'dcg' | 'generic' | etc.
   rate_limit_ms: number | null;
   tier: 'free' | 'premium' | 'both';
   enabled: boolean;
@@ -119,7 +118,7 @@ const readMetaPrice = ($: CheerioAPI): number | null => {
   return null;
 };
 
-// Collect many price candidates (selectors + WC + data + text)
+// Gather candidate prices from DOM/text
 const collectPriceCandidates = ($: CheerioAPI, rules?: any): number[] => {
   const cands: number[] = [];
   const pushN = (n: number | null) => {
@@ -146,30 +145,24 @@ const collectPriceCandidates = ($: CheerioAPI, rules?: any): number[] => {
     pushN(toFloat($(el).attr('data-ticket-price')));
   });
 
-  // STRICT text scan: require a £ sign to avoid stray integers like "1"
+  // STRICT text scan: require a £ sign
   const body = $('body').text();
   const strictMatches = body.match(/£\s?(\d+(?:\.\d{1,2})?)/g) || [];
   strictMatches.forEach((m) => pushN(toFloat(m)));
 
-  // RELAXED scan (no £) only if nothing found strictly
+  // RELAXED scan (no £) only if nothing strict
   if (!strictMatches.length) {
     const relaxed = body.match(/\b(\d+(?:\.\d{1,2})?)\b/g) || [];
     relaxed.forEach((m) => pushN(toFloat(m)));
   }
 
-  // Optional numeric range from rules (broad defaults)
+  // Optional numeric range from rules
   const min: number | null = rules?.price_min ?? 0.01;
   const max: number | null = rules?.price_max ?? 100;
   return cands.filter((n) => (min == null || n >= min) && (max == null || n <= max));
 };
 
-// Choose the most likely ticket price
-// 1) If trusted (JSON-LD/meta) -> return it
-// 2) Prefer DECIMAL prices under `price_prefer_under` (default £1.00)
-// 3) Prefer decimals in window (default 0.15–5.00)
-// 4) Any decimals
-// 5) Integers in window
-// 6) Smallest overall
+// Choose most likely ticket price
 const chooseBestPrice = (cands: number[], trusted?: number | null, rules?: any): number | null => {
   if (trusted != null) return trusted;
   if (!cands.length) return null;
@@ -181,30 +174,76 @@ const chooseBestPrice = (cands: number[], trusted?: number | null, rules?: any):
   const inWin = (n: number) => n >= preferMin && n <= preferMax;
   const hasDecimals = (n: number) => Math.abs(n - Math.round(n)) > 1e-9;
 
-  // 1) decimals strictly under £1.00 (or adapter override)
   const decUnder = cands.filter((n) => hasDecimals(n) && n < preferUnder);
   if (decUnder.length) return Math.min(...decUnder);
 
-  // 2) decimals within window
   const decIn = cands.filter((n) => inWin(n) && hasDecimals(n));
   if (decIn.length) return Math.min(...decIn);
 
-  // 3) any decimals (prefer smallest)
   const decAll = cands.filter(hasDecimals);
   if (decAll.length) return Math.min(...decAll);
 
-  // 4) integers within window (prefer smallest)
   const intIn = cands.filter((n) => inWin(n) && !hasDecimals(n));
   if (intIn.length) return Math.min(...intIn);
 
-  // 5) smallest overall
   return Math.min(...cands);
+};
+
+/** DCG-specific price reader driven by rules: looks near "price_anchor_text" (e.g., "Online Entry") */
+const extractPriceViaAnchor = ($: CheerioAPI, rules?: any): number | null => {
+  const anchor: string | undefined = rules?.price_anchor_text;
+  if (!anchor) return null;
+
+  const html = $.root().html() ?? '';
+  const re = new RegExp(`${anchor}[\\s\\S]{0,200}?£\\s?(\\d+(?:\\.\\d{1,2})?)`, 'i');
+  const m = html.match(re);
+  if (m?.[1]) return toFloat(m[1]);
+
+  const text = $('body').text();
+  const m2 = text.match(new RegExp(`${anchor}[\\s\\S]{0,200}?£\\s?(\\d+(?:\\.\\d{1,2})?)`, 'i'));
+  if (m2?.[1]) return toFloat(m2[1]);
+
+  return null;
 };
 
 // ---------- totals extractors ----------
 type Totals = { total: number | null; sold: number | null; remaining?: number | null };
 
+/** Try selectors from rules first (total_selector/sold_selector/remaining_selector) */
+const extractTotalsFromSelectors = ($: CheerioAPI, rules?: any): Totals | null => {
+  if (!rules) return null;
+
+  const read = (sel?: string): number | null => {
+    if (!sel) return null;
+    const node = $(sel).first();
+    if (!node.length) return null;
+    return toInt(node.text());
+  };
+
+  const total = read(rules.total_selector);
+  const sold = read(rules.sold_selector);
+  const remaining = read(rules.remaining_selector);
+
+  if (total != null || sold != null || remaining != null) {
+    // derive missing piece if possible
+    let t = total, s = sold, r = remaining;
+    if (t == null && s != null && r != null) t = s + r;
+    if (s == null && t != null && r != null) s = t - r;
+    if (r == null && t != null && s != null) r = t - s;
+    if (t != null && s != null && s > t) s = null;
+    return { total: t ?? null, sold: s ?? null, remaining: r ?? undefined };
+  }
+
+  return null;
+};
+
+// Regex/text fallback
 const extractTotalsGeneric = ($: CheerioAPI, rules?: any): Totals => {
+  // 1) selector-first
+  const selRes = extractTotalsFromSelectors($, rules);
+  if (selRes) return selRes;
+
+  // 2) text patterns
   const text = $('body').text();
 
   const totalPats: string[] = rules?.total_patterns ?? [
@@ -212,39 +251,46 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any): Totals => {
     'Max Tickets\\s*([\\d,]+)',
     'Maximum Tickets\\s*([\\d,]+)',
     'Tickets Available\\s*([\\d,]+)\\s*/\\s*([\\d,]+)',
+    '\\b([\\d,]+)\\s*entries\\b',
   ];
-
   const soldPats: string[] = rules?.sold_patterns ?? [
     '\\bSold\\s*:\\s*([\\d,]+)\\b',
     '\\b([\\d,]+)\\s*sold\\b',
   ];
+  const remPats: string[] = rules?.remaining_patterns ?? [
+    '\\b([\\d,]+)\\s*(?:tickets?|entries?)\\s*remaining\\b',
+    '\\bremaining\\s*(?:tickets?|entries?)?:?\\s*([\\d,]+)\\b',
+  ];
 
   let total: number | null = null;
   let sold: number | null = null;
+  let remaining: number | null = null;
+
+  for (const p of remPats) {
+    const re = new RegExp(p, 'i');
+    const m = text.match(re);
+    if (m?.[1]) { remaining = toInt(m[1]); break; }
+  }
 
   for (const p of totalPats) {
     const re = new RegExp(p, 'i');
     const m = text.match(re);
-    if (m) {
-      total = toInt(m[2] ?? m[1]);
-      if (m[2]) sold = toInt(m[1]); // sold/total variant
-      break;
-    }
+    if (m) { total = toInt(m[2] ?? m[1]); break; }
   }
 
-  if (sold == null) {
-    for (const p of soldPats) {
-      const re = new RegExp(p, 'i');
-      const m = text.match(re);
-      if (m) { sold = toInt(m[1]); break; }
-    }
+  for (const p of soldPats) {
+    const re = new RegExp(p, 'i');
+    const m = text.match(re);
+    if (m) { sold = toInt(m[1]); break; }
   }
 
-  if (total != null && sold != null && sold > total) sold = null;
-  return { total, sold };
+  if (total == null && sold != null && remaining != null) total = sold + remaining;
+  if (sold != null && total != null && sold > total) sold = null;
+
+  return { total, sold, remaining: remaining ?? undefined };
 };
 
-// Scripts & attributes scan
+// Scripts/attributes scan (for JS-rendered counts)
 const scanScriptsAndAttrsForTotals = ($: CheerioAPI, rules?: any): Totals => {
   const scripts = $('script').map((_, el) => $(el).contents().text()).get().join('\n');
   const html = $.root().html() ?? '';
@@ -280,10 +326,19 @@ const scanScriptsAndAttrsForTotals = ($: CheerioAPI, rules?: any): Totals => {
   let total = max;
   if (total == null && sold != null && remaining != null) total = sold + remaining;
 
-  return { total, sold, remaining };
+  return { total, sold, remaining: remaining ?? undefined };
 };
 
 const extractTotalsRevComps = ($: CheerioAPI, rules?: any): Totals => {
+  // selectors first
+  const selRes = extractTotalsFromSelectors($, rules);
+  if (selRes) return selRes;
+
+  // script/html hints
+  const scr = scanScriptsAndAttrsForTotals($, rules);
+  if (scr.total != null || scr.sold != null || scr.remaining != null) return scr;
+
+  // body text
   const text = $('body').text();
   const maxPhrase = toInt(text.match(/\bPRIZE HAS A MAX OF\s*([\d,]+)\s*TICKETS\b/i)?.[1]);
   let sold = toInt(text.match(/\bSOLD:\s*([\d,]+)/i)?.[1]) ?? null;
@@ -301,43 +356,15 @@ const extractTotalsRevComps = ($: CheerioAPI, rules?: any): Totals => {
   return { total, sold, remaining };
 };
 
-// DCG extractor (script/attr first, then text) — returns remaining too
+// DCG: selectors from rules → scripts/attrs → text
 const extractTotalsDCG = ($: CheerioAPI, rules?: any): Totals => {
-  const fromScripts = scanScriptsAndAttrsForTotals($, rules);
-  if (fromScripts.total != null || fromScripts.sold != null || fromScripts.remaining != null) {
-    const totalS = fromScripts.total;
-    let soldS = fromScripts.sold;
-    if (totalS != null && soldS != null && soldS > totalS) soldS = null;
-    return { total: totalS, sold: soldS, remaining: fromScripts.remaining ?? undefined };
-  }
+  const selRes = extractTotalsFromSelectors($, rules);
+  if (selRes) return selRes;
 
-  const text = $('body').text();
-  let total =
-    toInt(text.match(/\b([\d,]+)\s*entries\b/i)?.[1]) ??
-    toInt(text.match(/\bmax(?:imum)?\s*(?:entries|tickets)?:?\s*([\d,]+)\b/i)?.[1]) ??
-    toInt(text.match(/\btotal\s*(?:entries|tickets)?:?\s*([\d,]+)\b/i)?.[1]) ??
-    null;
+  const scr = scanScriptsAndAttrsForTotals($, rules);
+  if (scr.total != null || scr.sold != null || scr.remaining != null) return scr;
 
-  let remaining =
-    toInt(text.match(/\b([\d,]+)\s*tickets?\s*remaining\b/i)?.[1]) ??
-    toInt(text.match(/\bremaining\s*(?:tickets|entries)?:?\s*([\d,]+)\b/i)?.[1]) ??
-    null;
-
-  let sold =
-    toInt(text.match(/\b([\d,]+)\s*tickets?\s*sold\b/i)?.[1]) ??
-    toInt(text.match(/\bentries?\s*sold:\s*([\d,]+)\b/i)?.[1]) ??
-    null;
-
-  if (remaining != null && sold == null && total != null) sold = total - remaining;
-  if (total == null && remaining != null && sold != null) total = remaining + sold;
-
-  if (total != null && sold != null && sold > total) sold = null;
-  if (total == null) {
-    const g = extractTotalsGeneric($, rules);
-    total = g.total;
-    if (sold == null) sold = g.sold;
-  }
-  return { total, sold, remaining };
+  return extractTotalsGeneric($, rules);
 };
 
 // ---------- parser factory ----------
@@ -357,15 +384,19 @@ const buildParser = (adapter_key: string, rules?: any) => {
 
     if (!prize) return null;
 
-    // PRICE (trust JSON-LD/meta -> choose from candidates with decimal preference)
-    const metaPrice = readMetaPrice($);
-    const candPrices = collectPriceCandidates($, rules);
-    const entry_fee = chooseBestPrice(candPrices, ld.price ?? metaPrice ?? null, rules);
+    // PRICE (rules-driven)
+    let entry_fee: number | null = null;
+    entry_fee = extractPriceViaAnchor($, rules);
     if (entry_fee == null) {
-      console.warn('[scrape] price not found; url=', url, 'site=', siteName);
+      const metaPrice = readMetaPrice($);
+      const candPrices = collectPriceCandidates($, rules);
+      entry_fee = chooseBestPrice(candPrices, ld.price ?? metaPrice ?? null, rules);
+      if (entry_fee == null) {
+        console.warn('[scrape] price not found; url=', url, 'site=', siteName);
+      }
     }
 
-    // TOTALS (now includes remaining)
+    // TOTALS (selectors → scripts → text)
     let totals: Totals;
     switch (adapter_key) {
       case 'revcomps':
@@ -398,16 +429,13 @@ const buildParser = (adapter_key: string, rules?: any) => {
 async function loadSites(userTier: 'free' | 'premium' | 'both') {
   const baseSel = 'id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled';
 
-  // Primary: enabled=true
   let { data, error } = await supabase
     .from('sites')
     .select(baseSel)
     .eq('enabled', true);
-
   if (error) throw error;
-  let rows = (data ?? []) as SiteCfg[];
 
-  // Fallback: all sites
+  let rows = (data ?? []) as SiteCfg[];
   if (!rows.length) {
     const retry = await supabase.from('sites').select(baseSel);
     if (retry.error) throw retry.error;
@@ -415,7 +443,6 @@ async function loadSites(userTier: 'free' | 'premium' | 'both') {
     console.warn('[scrape] No sites with enabled=true; falling back to all sites. Count:', rows.length);
   }
 
-  // Tier filter
   const filtered = rows.filter((s) =>
     userTier === 'both' ? true : (s.tier === 'both' || s.tier === userTier)
   );
@@ -447,12 +474,11 @@ export async function POST(req: NextRequest) {
       .select('adapter_key,rules');
     if (rulesErr) throw rulesErr;
 
-    // Map rules by adapter_key
     const rulesMap = new Map<string, any>();
     (rulesData ?? []).forEach((r: AdapterRules) => rulesMap.set(r.adapter_key, r.rules));
 
     const apiRows: ApiRow[] = [];
-    const dbRows: DbRow[] = []; // strictly DB-safe payload (no generated cols)
+    const dbRows: DbRow[] = [];
     const seen = new Set<string>();
 
     for (const site of siteRows) {
@@ -468,7 +494,7 @@ export async function POST(req: NextRequest) {
         const listHtml = await fetchHtml(site.list_url);
         const $ = load(listHtml);
 
-        // Harvest raw links
+        // Raw links
         let links = Array.from(
           new Set(
             $(site.link_selector)
@@ -479,17 +505,15 @@ export async function POST(req: NextRequest) {
           )
         );
 
-        // Default per-adapter link heuristics + rules allow/deny
+        // Allow/Deny via adapter rules
         const rules = rulesMap.get(site.adapter_key) ?? {};
 
-        // default adapter allow
         const defaultAllow =
           site.adapter_key === 'dcg' ? /\/competitions\//i :
           site.adapter_key === 'revcomps' ? /\/(product|competitions?)\//i :
           null;
         if (defaultAllow) links = links.filter((u) => defaultAllow.test(u));
 
-        // rules allow/deny
         if (rules.link_allow_regex) {
           const allow = new RegExp(rules.link_allow_regex, 'i');
           links = links.filter((u) => allow.test(u));
@@ -499,7 +523,6 @@ export async function POST(req: NextRequest) {
           links = links.filter((u) => !deny.test(u));
         }
 
-        // Remove obvious DCG category pages like /competitions/cash, /competitions/instant etc.
         if (site.adapter_key === 'dcg') {
           const denySlugs = new Set(['cash', 'cars', 'tech', 'instant', 'winners', 'draws', 'terms']);
           links = links.filter((u) => {
@@ -507,7 +530,6 @@ export async function POST(req: NextRequest) {
             if (!m) return false;
             const slug = m[1].toLowerCase();
             if (denySlugs.has(slug)) return false;
-            // require a more specific slug (hyphen or digits), avoids bare category pages
             return /[-\d]/.test(slug);
           });
         }
@@ -530,7 +552,6 @@ export async function POST(req: NextRequest) {
 
             const scraped_at = new Date().toISOString();
 
-            // API row (includes computed fields)
             const apiRow: ApiRow = {
               ...parsed,
               scraped_at,
@@ -541,7 +562,6 @@ export async function POST(req: NextRequest) {
             }
             apiRows.push(apiRow);
 
-            // DB row (excludes generated fields)
             const dbRow: DbRow = {
               prize: apiRow.prize,
               site_name: apiRow.site_name,
@@ -560,7 +580,6 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Upsert ONLY the DB-safe rows we just added for this site
         const added = dbRows.length - before;
         console.log(`[scrape] ${site.name}: rows parsed`, added);
 
@@ -582,19 +601,16 @@ export async function POST(req: NextRequest) {
                 .eq('id', runId);
             }
             console.error(`[scrape] upsert error for ${site.name}:`, error.message);
-            continue;
+          } else if (runId) {
+            await supabase
+              .from('scrape_runs')
+              .update({
+                status: 'ok',
+                items_ingested: added,
+                finished_at: new Date().toISOString(),
+              })
+              .eq('id', runId);
           }
-        }
-
-        if (runId) {
-          await supabase
-            .from('scrape_runs')
-            .update({
-              status: 'ok',
-              items_ingested: added,
-              finished_at: new Date().toISOString(),
-            })
-            .eq('id', runId);
         }
       } catch (siteErr: any) {
         if (runId) {
