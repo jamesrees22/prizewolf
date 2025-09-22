@@ -16,12 +16,12 @@ Use it as a living backlog. Update frequently!
 - Improve odds formatting (e.g. `1 in 3463` → `1 in 3,463`)
 - Add **favicon** (basic wolf icon until branded assets are ready)
 - Results page: add **sort & filter** (odds ↑/↓, entry fee ↑/↓)
+- UI polish: enlarge logo, reduce spacing above search box
 
 ---
 
 ## 🚧 Now (in progress / near term)
 - [ ] UI: Show **Remaining tickets** column in results table
-- [ ] UI polish: enlarge logo, reduce spacing above search box
 - [ ] Clean up error handling/logging in scraper route
 - [ ] Add more site adapters (e.g. 7Days Performance, Elite Competitions)
 
