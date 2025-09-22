@@ -17,7 +17,8 @@ interface Competition {
   entry_fee: number | null;
   total_tickets: number | null;
   tickets_sold: number | null;
-  odds: number | null; // DB stores remaining tickets here
+  remaining_tickets: number | null; // <-- NEW from DB generated column
+  odds: number | null;              // "1 in N" (we treat as remaining N for formatting)
   url: string;
   scraped_at: string | null;
 }
@@ -61,15 +62,13 @@ export default function ResultsPage() {
         sort === 'entry_fee_asc' ? ['entry_fee', true] :
         ['entry_fee', false] as const;
 
-      let queryBuilder = supabase
+      const { data, error } = await supabase
         .from('competitions')
         .select('*')
         .ilike('prize', `%${query}%`)
         .order(col, { ascending: dir, nullsFirst: true }) // keep nulls grouped
         .order('prize', { ascending: true }) // stable secondary order
         .limit(tier === 'paid' ? 50 : 10);
-
-      const { data, error } = await queryBuilder;
 
       if (error) {
         console.error('Supabase SELECT error:', error);
@@ -189,7 +188,6 @@ export default function ResultsPage() {
           </thead>
           <tbody>
             {rows.map((comp) => {
-              const remaining = comp.odds;
               const isMarked = markedIds.has(comp.id);
               const isBusy = !!marking[comp.id];
 
@@ -198,7 +196,7 @@ export default function ResultsPage() {
                   <td className="p-2">{comp.prize}</td>
                   <td className="p-2">{comp.site_name}</td>
                   <td className="p-2 text-right">{fmtOdds(comp.odds)}</td>
-                  <td className="p-2 text-right">{fmtInt(remaining)}</td>
+                  <td className="p-2 text-right">{fmtInt(comp.remaining_tickets)}</td>
                   <td className="p-2 text-right">{fmtMoney(comp.entry_fee ?? null)}</td>
                   <td className="p-2 text-center">
                     <a href={comp.url} target="_blank" className="underline">Enter</a>
