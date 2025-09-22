@@ -66,13 +66,13 @@ const sleep = (ms?: number | null) =>
 
 const toFloat = (s?: string | null): number | null => {
   if (!s) return null;
-  const n = parseFloat(s.replace(/[^\d.]/g, ''));
+  const n = parseFloat(String(s).replace(/[^\d.]/g, ''));
   return Number.isFinite(n) ? n : null;
 };
 
 const toInt = (s?: string | null): number | null => {
   if (!s) return null;
-  const n = parseInt(s.replace(/[^\d]/g, ''), 10);
+  const n = parseInt(String(s).replace(/[^\d]/g, ''), 10);
   return Number.isFinite(n) ? n : null;
 };
 
@@ -113,30 +113,48 @@ const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | nul
   return {};
 };
 
+// --- OpenGraph / Meta price reader ---
+const readMetaPrice = ($: CheerioAPI): number | null => {
+  const props = [
+    'product:price:amount',
+    'og:price:amount',
+    'twitter:data1',
+  ];
+  for (const p of props) {
+    const v = $(`meta[property="${p}"], meta[name="${p}"]`).attr('content');
+    const n = toFloat(v);
+    if (n != null) return n;
+  }
+  return null;
+};
+
 // Price fallback when JSON-LD missing
-const parsePrice = ($: CheerioAPI, rules?: any) => {
+const parsePriceFallback = ($: CheerioAPI, rules?: any) => {
+  // Site-configured selectors first
   const priceSelectors: string[] = rules?.price_selectors ?? [];
   for (const sel of priceSelectors) {
     const text = $(sel).first().text();
     const n = toFloat(text);
     if (n != null) return n;
   }
-  // WooCommerce common nodes
+  // WooCommerce common nodes (prefer regular amounts over tiny fees)
   const wc =
-    toFloat($('.price .amount').first().text()) ??
-    toFloat($('.woocommerce-Price-amount').first().text());
+    toFloat($('.summary .price .amount').first().text()) ??
+    toFloat($('.woocommerce-Price-amount').first().text()) ??
+    toFloat($('.price .amount').first().text());
   if (wc != null) return wc;
 
-  // Last-resort text scan (bounded window)
+  // Last-resort text scan with a reasonable lower bound (avoid 0.20 noise)
   const body = $('body').text();
   const matches = body.match(/\b£?\s?(\d+(?:\.\d{1,2})?)\b/g) || [];
   const nums = matches.map((m) => toFloat(m)).filter((n): n is number => n != null);
   if (nums.length === 0) return null;
 
-  const min = rules?.price_window?.min ?? 0.1;
+  const min = rules?.price_window?.min ?? 0.5; // avoid 0.20 fees
   const max = rules?.price_window?.max ?? 50;
   const plausible = nums.filter((v) => v >= min && v <= max);
   if (plausible.length === 0) return null;
+  // choose the modal candidate: but for now, pick the smallest plausible visible "ticket" price
   return Math.min(...plausible);
 };
 
@@ -182,6 +200,40 @@ const extractTotalsGeneric = ($: CheerioAPI, rules?: any) => {
   return { total, sold };
 };
 
+// --- Scan scripts & attributes for JSON values commonly used by DCG ---
+const scanScriptsAndAttrsForTotals = ($: CheerioAPI) => {
+  const scripts = $('script')
+    .map((_, el) => $(el).contents().text())
+    .get()
+    .join('\n');
+
+  const html = $.root().html() ?? '';
+
+  const first = (...vals: Array<string | null | undefined>) => vals.find((v) => v != null) ?? null;
+
+  const remaining =
+    toInt(scripts.match(/"remaining"\s*:\s*"*([\d,]+)"*/i)?.[1]) ??
+    toInt(scripts.match(/"tickets_remaining"\s*:\s*"*([\d,]+)"*/i)?.[1]) ??
+    toInt(html.match(/data-remaining\s*=\s*"([\d,]+)"/i)?.[1]) ??
+    toInt(html.match(/data-entries-remaining\s*=\s*"([\d,]+)"/i)?.[1]) ??
+    null;
+
+  const sold =
+    toInt(scripts.match(/"sold"\s*:\s*"*([\d,]+)"*/i)?.[1]) ??
+    toInt(html.match(/data-sold\s*=\s*"([\d,]+)"/i)?.[1]) ??
+    null;
+
+  const max =
+    toInt(scripts.match(/"max(?:imum)?_?(?:tickets|entries)"\s*:\s*"*([\d,]+)"*/i)?.[1]) ??
+    toInt(html.match(/data-max(?:-)?(?:tickets|entries)\s*=\s*"([\d,]+)"/i)?.[1]) ??
+    null;
+
+  let total = max;
+  if (total == null && sold != null && remaining != null) total = sold + remaining;
+
+  return { total, sold, remaining };
+};
+
 const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
   const text = $('body').text();
 
@@ -203,6 +255,16 @@ const extractTotalsRevComps = ($: CheerioAPI, rules?: any) => {
 
 // Broadened Dream Car Giveaways extractor
 const extractTotalsDCG = ($: CheerioAPI) => {
+  // First, try parsing structured/script/attribute data (JS-rendered pages)
+  const fromScripts = scanScriptsAndAttrsForTotals($);
+  if (fromScripts.total != null || fromScripts.sold != null || fromScripts.remaining != null) {
+    const total = fromScripts.total;
+    let sold = fromScripts.sold;
+    if (total != null && sold != null && sold > total) sold = null;
+    return { total, sold };
+  }
+
+  // Fallback to text-based extraction
   const text = $('body').text();
 
   const remaining =
@@ -251,13 +313,11 @@ const buildParser = (adapter_key: string, rules?: any) => {
 
     if (!prize) return null;
 
+    const metaPrice = readMetaPrice($);
     const entry_fee =
       (ld.price != null ? ld.price : null) ||
-      parsePrice($, rules) ||
-      toFloat($('.price .amount').first().text()) ||
-      toFloat($('.woocommerce-Price-amount').first().text()) ||
-      toFloat($('.price').first().text()) ||
-      toFloat($('[class*="price"]').first().text());
+      (metaPrice != null ? metaPrice : null) ||
+      parsePriceFallback($, rules);
 
     let totals: { total: number | null; sold: number | null };
     switch (adapter_key) {
@@ -357,7 +417,8 @@ export async function POST(req: NextRequest) {
         const listHtml = await fetchHtml(site.list_url);
         const $ = load(listHtml);
 
-        const links = Array.from(
+        // Basic link harvest
+        let links = Array.from(
           new Set(
             $(site.link_selector)
               .map((_, a) => $(a).attr('href'))
@@ -365,8 +426,16 @@ export async function POST(req: NextRequest) {
               .filter(Boolean)
               .map((href) => new URL(href!, site.list_url).href)
           )
-        ).slice(0, 60);
+        );
 
+        // Per-site link heuristics (keeps product pages, drops banners etc.)
+        if (site.adapter_key === 'dcg') {
+          links = links.filter((u) => /\/competitions\//i.test(u));
+        } else if (site.adapter_key === 'revcomps') {
+          links = links.filter((u) => /\/product\//i.test(u) || /\/competitions?\//i.test(u));
+        }
+
+        links = links.slice(0, 60);
         console.log(`[scrape] ${site.name}: links found`, links.length);
 
         const parseDetail = buildParser(site.adapter_key, rulesMap.get(site.adapter_key));
