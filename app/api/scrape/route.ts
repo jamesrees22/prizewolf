@@ -10,6 +10,16 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY as string
 );
 
+/* ---------- INSERT #1: cron guard (small) ---------- */
+const CRON_SECRET = process.env.CRON_SECRET;
+const IS_DEV = process.env.NODE_ENV !== 'production';
+function isAuthorized(req: NextRequest): boolean {
+  if (IS_DEV) return true; // allow local/dev testing
+  const key = req.headers.get('x-cron-key');
+  return !!CRON_SECRET && key === CRON_SECRET;
+}
+/* ---------- /insert #1 ---------- */
+
 // ---------- types ----------
 type ApiRow = {
   prize: string;
@@ -564,6 +574,12 @@ async function loadSites(userTier: 'free' | 'premium' | 'both') {
 
 // ---------- HTTP handler ----------
 export async function POST(req: NextRequest) {
+  /* ---------- INSERT #2: use guard at start of handler ---------- */
+  if (!isAuthorized(req)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  /* ---------- /insert #2 ---------- */
+
   try {
     const body = await req.json().catch(() => ({} as any));
     const query: string = String(body?.query ?? '');
