@@ -1,0 +1,165 @@
+-- ============================================================
+-- PrizeWolf tidy schema (profiles tiers + RLS + competitions)
+-- Idempotent: safe to run multiple times
+-- ============================================================
+
+-- --- ENUM: user_tier
+do $$
+begin
+  if not exists (select 1 from pg_type where typname = 'user_tier') then
+    create type user_tier as enum ('free','premium','admin');
+  end if;
+end$$;
+
+-- --- TABLE: profiles (upgrade-in-place)
+-- Ensure required columns exist
+alter table public.profiles
+  add column if not exists tier user_tier,
+  add column if not exists display_name text,
+  add column if not exists stripe_customer_id text,
+  add column if not exists created_at timestamptz not null default now(),
+  add column if not exists updated_at timestamptz;
+
+-- Defaults
+alter table public.profiles
+  alter column tier set default 'free'::user_tier;
+
+-- Primary key on id (already expected, but guard anyway)
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_index i
+    join pg_class c on c.oid = i.indrelid
+    where c.relname = 'profiles' and i.indisprimary
+  ) then
+    alter table public.profiles add primary key (id);
+  end if;
+end$$;
+
+-- FK to auth.users(id) (drop any different FK; add correct one)
+do $$
+declare
+  fk_name text;
+begin
+  for fk_name in
+    select conname
+    from pg_constraint
+    where conrelid = 'public.profiles'::regclass
+      and contype = 'f'
+      and pg_get_constraintdef(oid) not ilike '%references auth.users(id)%'
+  loop
+    execute format('alter table public.profiles drop constraint %I;', fk_name);
+  end loop;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.profiles'::regclass
+      and contype = 'f'
+      and conname = 'profiles_id_fkey'
+  ) then
+    alter table public.profiles
+      add constraint profiles_id_fkey
+      foreign key (id) references auth.users (id) on delete cascade;
+  end if;
+end$$;
+
+-- Backfill updated_at if null
+update public.profiles set updated_at = now() where updated_at is null;
+
+-- --- UPDATED_AT trigger
+create or replace function public.set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_profiles_updated_at on public.profiles;
+create trigger trg_profiles_updated_at
+before update on public.profiles
+for each row execute function public.set_updated_at();
+
+-- --- SIGNUP trigger: insert a free profile on new auth user
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+as $$
+begin
+  insert into public.profiles (id, tier)
+  values (new.id, 'free')
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_on_auth_user_created on auth.users;
+create trigger trg_on_auth_user_created
+after insert on auth.users
+for each row execute function public.handle_new_user();
+
+-- --- RLS: profiles
+alter table public.profiles enable row level security;
+
+-- Select own profile
+drop policy if exists "profiles_select_own" on public.profiles;
+create policy "profiles_select_own"
+on public.profiles
+for select
+using (auth.uid() = id);
+
+-- Update own profile but NOT tier
+drop policy if exists "profiles_update_self_no_tier_change" on public.profiles;
+create policy "profiles_update_self_no_tier_change"
+on public.profiles
+for update
+using (auth.uid() = id)
+with check (
+  auth.uid() = id
+  and (case when new.tier is distinct from old.tier then false else true end)
+);
+
+-- --- Convenience view
+create or replace view public.my_profile as
+select *
+from public.profiles
+where id = auth.uid();
+
+-- ============================================================
+-- competitions RLS based on user tier
+-- ============================================================
+
+-- Ensure competitions has RLS on (do not change existing non-tier rules)
+alter table public.competitions enable row level security;
+
+-- FREE access policy (allowlist by site_name) — adjust list as needed
+drop policy if exists "Free tier access" on public.competitions;
+create policy "Free tier access"
+on public.competitions
+for select
+using (
+  site_name = ANY (ARRAY['Rev Comps'::text, 'Dream Car Giveaways'::text])
+  and exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid()
+      and p.tier = 'free'
+  )
+);
+
+-- PREMIUM/ADMIN full access
+drop policy if exists "Paid tier access" on public.competitions;
+create policy "Paid tier access"
+on public.competitions
+for select
+using (
+  exists (
+    select 1
+    from public.profiles p
+    where p.id = auth.uid()
+      and p.tier in ('premium','admin')
+  )
+);
