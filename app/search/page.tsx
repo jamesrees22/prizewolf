@@ -1,17 +1,19 @@
 'use client';
+export const dynamic = 'force-dynamic';
+
 import { useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { useRouter } from 'next/navigation';
 import type { Session } from '@supabase/supabase-js';
 
+// Safe Supabase init (no throw at build)
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Supabase environment variables are not configured. Check Codespaces secrets.');
+let supabase: SupabaseClient | null = null;
+if (typeof window !== 'undefined' && supabaseUrl && supabaseAnonKey) {
+  supabase = createClient(supabaseUrl, supabaseAnonKey);
 }
-
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default function SearchPage() {
   const [query, setQuery] = useState('');
@@ -20,6 +22,11 @@ export default function SearchPage() {
   const router = useRouter();
 
   const handleSearch = async () => {
+    if (!supabase) {
+      setError('Supabase client not available. Check environment variables.');
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -50,7 +57,6 @@ export default function SearchPage() {
           body: JSON.stringify({ query }),
         });
 
-        // Try to parse; tolerate empty body
         let freshData: unknown[] = [];
         const text = await res.text();
         if (text) {
@@ -71,7 +77,6 @@ export default function SearchPage() {
     }
   };
 
-  // Use a form so Enter submits naturally anywhere in the input
   const onSubmit: React.FormEventHandler<HTMLFormElement> = (e) => {
     e.preventDefault();
     if (!loading && query.trim().length > 0) {
@@ -81,7 +86,6 @@ export default function SearchPage() {
 
   return (
     <div className="min-h-screen bg-midnight-blue text-wolf-grey flex flex-col items-center justify-center p-8">
-      {/* Logo slightly larger; keep tight spacing */}
       <img src="/logo.png" alt="PrizeWolf Logo" className="mb-2 w-72 h-auto" />
 
       <form onSubmit={onSubmit} className="w-full max-w-md flex flex-col items-stretch">
@@ -98,7 +102,6 @@ export default function SearchPage() {
 
         <button
           type="submit"
-          onClick={(e) => { /* still supports click */ }}
           disabled={loading || query.trim().length === 0}
           className="inline-flex items-center justify-center gap-2 bg-electric-gold text-midnight-blue font-bold py-2 px-6 rounded-md hover:bg-neon-red hover:text-white transition disabled:opacity-60 disabled:cursor-not-allowed"
         >

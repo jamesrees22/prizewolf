@@ -1,12 +1,19 @@
 'use client';
+export const dynamic = 'force-dynamic';
+
 import { useEffect, useMemo, useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { useRouter, useSearchParams } from 'next/navigation';
 import type { Session } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Safe Supabase init (don’t throw at build)
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+let supabase: SupabaseClient | null = null;
+if (typeof window !== 'undefined' && supabaseUrl && supabaseAnonKey) {
+  supabase = createClient(supabaseUrl, supabaseAnonKey);
+}
 
 type UUID = string;
 
@@ -15,10 +22,10 @@ interface Competition {
   prize: string;
   site_name: string;
   entry_fee: number | null;
-  total_tickets: number | null;      // used for "Odds (1 in X)"
+  total_tickets: number | null;
   tickets_sold: number | null;
-  remaining_tickets: number | null;  // generated column in DB
-  odds: number | null;               // legacy/compat
+  remaining_tickets: number | null;
+  odds: number | null;
   url: string;
   scraped_at: string | null;
 }
@@ -40,14 +47,18 @@ export default function ResultsPage() {
   // formatters
   const fmtInt = (n: number | null | undefined) =>
     n == null ? 'N/A' : n.toLocaleString('en-GB');
-
   const fmtMoney = (n: number | null | undefined) =>
     n == null ? 'N/A' : `£${n.toFixed(2)}`;
-
   const fmtOdds = (total: number | null | undefined) =>
     total == null ? 'N/A' : `1 in ${total.toLocaleString('en-GB')}`;
 
   useEffect(() => {
+    if (!supabase) {
+      setErrorMsg('Supabase client not available. Check environment variables.');
+      setLoading(false);
+      return;
+    }
+
     const fetchResults = async () => {
       setLoading(true);
       setErrorMsg(null);
@@ -55,7 +66,6 @@ export default function ResultsPage() {
       const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
       const tier = session?.user?.user_metadata?.subscription_tier || 'free';
 
-      // "odds" sorts by total_tickets (lower total = better odds)
       const [col, dir] =
         sort === 'odds_asc' ? ['total_tickets', true] :
         sort === 'odds_desc' ? ['total_tickets', false] :
@@ -84,6 +94,8 @@ export default function ResultsPage() {
   }, [query, sort]);
 
   useEffect(() => {
+    if (!supabase) return;
+
     const preloadMarked = async () => {
       if (results.length === 0) {
         setMarkedIds(new Set());
@@ -108,6 +120,10 @@ export default function ResultsPage() {
   }, [results]);
 
   const handleMarkEntered = async (competitionId: UUID) => {
+    if (!supabase) {
+      setErrorMsg('Supabase client not available.');
+      return;
+    }
     setErrorMsg(null);
     setMarking(prev => ({ ...prev, [competitionId]: true }));
     try {
@@ -137,7 +153,6 @@ export default function ResultsPage() {
 
   const rows = useMemo(() => results, [results]);
 
-  // Header cells mapped to avoid whitespace text nodes inside <tr>
   const tableHeaders = [
     { key: 'prize',      label: 'Prize',       align: 'text-left'  },
     { key: 'site',       label: 'Site',        align: 'text-left'  },
