@@ -51,6 +51,8 @@ type DbRow = {
   tickets_sold: number | null;
   url: string;
   scraped_at?: string;
+  // --- minimal addition so TypeScript accepts the upsert payload
+  is_closed?: boolean | null;
 };
 
 type AdapterRules = { adapter_key: string; rules: any };
@@ -666,6 +668,15 @@ export async function POST(req: NextRequest) {
             }
             apiRows.push(apiRow);
 
+            // ---- MINIMAL ADDITION: compute is_closed and include in DB row ----
+            const remaining_final =
+              apiRow.remaining_tickets ?? computeRemaining(apiRow.total_tickets, apiRow.tickets_sold);
+            const isClosed =
+              (remaining_final !== null && remaining_final !== undefined && remaining_final <= 0) ||
+              (apiRow.total_tickets != null &&
+               apiRow.tickets_sold != null &&
+               apiRow.tickets_sold >= apiRow.total_tickets);
+
             const dbRow: DbRow = {
               prize: apiRow.prize,
               site_name: apiRow.site_name,
@@ -674,7 +685,10 @@ export async function POST(req: NextRequest) {
               tickets_sold: apiRow.tickets_sold,
               url: apiRow.url,
               scraped_at: apiRow.scraped_at,
+              is_closed: isClosed, // <--- new field persisted
             };
+            // -------------------------------------------------------------------
+
             dbRows.push(dbRow);
 
             await sleep(site.rate_limit_ms);
