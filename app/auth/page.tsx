@@ -3,14 +3,16 @@ import { useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { useRouter } from 'next/navigation';
 
+export const dynamic = 'force-dynamic'; // ✅ prevents Next.js from pre-rendering this page
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Supabase environment variables are not configured. Check Codespaces secrets.');
+// ✅ Don’t throw at build time — just handle missing keys gracefully
+let supabase: ReturnType<typeof createClient> | null = null;
+if (typeof window !== 'undefined' && supabaseUrl && supabaseAnonKey) {
+  supabase = createClient(supabaseUrl, supabaseAnonKey);
 }
-
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default function AuthPage() {
   const [email, setEmail] = useState('');
@@ -21,6 +23,12 @@ export default function AuthPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (!supabase) {
+      setError('Supabase client not available. Please check environment config.');
+      return;
+    }
+
     const { error } = await supabase.auth.signInWithPassword({
       email,
       password,
