@@ -1,7 +1,7 @@
 'use client';
 export const dynamic = 'force-dynamic';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, Suspense } from 'react';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { useRouter, useSearchParams } from 'next/navigation';
 import type { Session } from '@supabase/supabase-js';
@@ -32,7 +32,8 @@ interface Competition {
 
 type SortOption = 'odds_asc' | 'odds_desc' | 'entry_fee_asc' | 'entry_fee_desc';
 
-export default function ResultsPage() {
+// -------------------- Inner component (real page logic) --------------------
+function ResultsPageInner() {
   const [results, setResults] = useState<Competition[]>([]);
   const [loading, setLoading] = useState(true);
   const [marking, setMarking] = useState<Record<UUID, boolean>>({});
@@ -63,7 +64,8 @@ export default function ResultsPage() {
       setLoading(true);
       setErrorMsg(null);
 
-      const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
+      const { data: { session } } =
+        await supabase.auth.getSession() as { data: { session: Session | null } };
       const tier = session?.user?.user_metadata?.subscription_tier || 'free';
 
       const [col, dir] =
@@ -101,7 +103,8 @@ export default function ResultsPage() {
         setMarkedIds(new Set());
         return;
       }
-      const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
+      const { data: { session } } =
+        await supabase.auth.getSession() as { data: { session: Session | null } };
       if (!session) {
         setMarkedIds(new Set());
         return;
@@ -127,7 +130,8 @@ export default function ResultsPage() {
     setErrorMsg(null);
     setMarking(prev => ({ ...prev, [competitionId]: true }));
     try {
-      const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
+      const { data: { session } } =
+        await supabase.auth.getSession() as { data: { session: Session | null } };
       if (!session) {
         router.push('/auth');
         return;
@@ -237,5 +241,14 @@ export default function ResultsPage() {
         </table>
       )}
     </div>
+  );
+}
+
+// -------------------- Wrapper with Suspense --------------------
+export default function ResultsPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-wolf-grey">Loading results…</div>}>
+      <ResultsPageInner />
+    </Suspense>
   );
 }
