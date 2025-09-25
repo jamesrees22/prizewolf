@@ -30,45 +30,17 @@ export default function SearchPage() {
     setLoading(true);
     setError(null);
     try {
-      const { data: { session } } = await supabase.auth.getSession() as { data: { session: Session | null } };
+      // Require an active session (so we can apply tier gating later on Results)
+      const { data: { session } } =
+        await supabase.auth.getSession() as { data: { session: Session | null } };
+
       if (!session) {
         setError('No active session. Please log in.');
         router.push('/auth');
         return;
       }
 
-      const tier = session?.user?.user_metadata?.subscription_tier || 'free';
-      const { data, error: queryError } = await supabase
-        .from('competitions')
-        .select('*')
-        .ilike('prize', `%${query}%`)
-        .order('odds', { ascending: true })
-        .limit(tier === 'paid' ? 50 : 10);
-
-      if (queryError) {
-        setError(queryError.message);
-        return;
-      }
-
-      if (!data || data.length === 0) {
-        const res = await fetch('/api/scrape', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query }),
-        });
-
-        let freshData: unknown[] = [];
-        const text = await res.text();
-        if (text) {
-          try { freshData = JSON.parse(text); } catch { /* ignore parse error */ }
-        }
-
-        if (!res.ok || freshData.length === 0) {
-          setError('No competitions found after scraping. Try a different query.');
-          return;
-        }
-      }
-
+      // No scraping here — just navigate to results which will read from DB only.
       router.push(`/results?query=${encodeURIComponent(query)}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');

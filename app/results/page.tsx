@@ -66,21 +66,30 @@ function ResultsPageInner() {
 
       const { data: { session } } =
         await supabase.auth.getSession() as { data: { session: Session | null } };
-      const tier = session?.user?.user_metadata?.subscription_tier || 'free';
 
+      // Tier handling: accept 'paid' or 'premium' as paid
+      const rawTier = session?.user?.user_metadata?.subscription_tier || 'free';
+      const isPaid = rawTier === 'paid' || rawTier === 'premium';
+      const pageLimit = isPaid ? 50 : 10;
+
+      // "odds" = lower total_tickets is better
       const [col, dir] =
         sort === 'odds_asc' ? ['total_tickets', true] :
         sort === 'odds_desc' ? ['total_tickets', false] :
         sort === 'entry_fee_asc' ? ['entry_fee', true] :
         ['entry_fee', false] as const;
 
-      const { data, error } = await supabase
+      // DB-only: exclude closed competitions
+      const q = supabase
         .from('competitions')
         .select('*')
+        .eq('is_closed', false)
         .ilike('prize', `%${query}%`)
         .order(col, { ascending: dir, nullsFirst: true })
         .order('prize', { ascending: true })
-        .limit(tier === 'paid' ? 50 : 10);
+        .limit(pageLimit);
+
+      const { data, error } = await q;
 
       if (error) {
         console.error('Supabase SELECT error:', error);
@@ -141,6 +150,7 @@ function ResultsPageInner() {
         .from('user_entries')
         .insert([{ user_id, competition_id: competitionId }]);
       if (error) {
+        // 23505 = unique violation (already marked)
         if ((error as any).code === '23505') {
           setMarkedIds(prev => new Set(prev).add(competitionId));
         } else {
@@ -171,7 +181,7 @@ function ResultsPageInner() {
     <div className="min-h-screen bg-midnight-blue text-wolf-grey p-8">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <h1 className="text-3xl font-bold text-electric-gold">
-          Results for "{query}"
+          Results for &quot;{query}&quot;
         </h1>
 
         <div className="flex items-center gap-2">
