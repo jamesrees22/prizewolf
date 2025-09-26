@@ -6,7 +6,6 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { useRouter } from 'next/navigation';
 import type { Session } from '@supabase/supabase-js';
 
-// Safe Supabase init (no throw at build)
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
@@ -30,7 +29,6 @@ export default function SearchPage() {
     setLoading(true);
     setError(null);
     try {
-      // Require an active session (so we can apply tier gating later on Results)
       const { data: { session } } =
         await supabase.auth.getSession() as { data: { session: Session | null } };
 
@@ -40,7 +38,7 @@ export default function SearchPage() {
         return;
       }
 
-      // No scraping here — just navigate to results which will read from DB only.
+      // Navigate to results page, which will filter out closed competitions
       router.push(`/results?query=${encodeURIComponent(query)}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');

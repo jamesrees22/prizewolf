@@ -51,8 +51,7 @@ type DbRow = {
   tickets_sold: number | null;
   url: string;
   scraped_at?: string;
-  // --- minimal addition so TypeScript accepts the upsert payload
-  is_closed?: boolean | null;
+  is_closed?: boolean | null; // NEW
 };
 
 type AdapterRules = { adapter_key: string; rules: any };
@@ -518,7 +517,6 @@ const buildParser = (adapter_key: string, rules?: any) => {
 };
 
 // ---------- site loader with fallback + logging ----------
-// (signature changed to accept client)
 async function loadSites(supabase: SupabaseClient, userTier: 'free' | 'premium' | 'both') {
   const baseSel = 'id,name,list_url,link_selector,adapter_key,rate_limit_ms,tier,enabled';
 
@@ -668,7 +666,7 @@ export async function POST(req: NextRequest) {
             }
             apiRows.push(apiRow);
 
-            // ---- MINIMAL ADDITION: compute is_closed and include in DB row ----
+            // ---- compute is_closed and include in DB row ----
             const remaining_final =
               apiRow.remaining_tickets ?? computeRemaining(apiRow.total_tickets, apiRow.tickets_sold);
             const isClosed =
@@ -685,15 +683,24 @@ export async function POST(req: NextRequest) {
               tickets_sold: apiRow.tickets_sold,
               url: apiRow.url,
               scraped_at: apiRow.scraped_at,
-              is_closed: isClosed, // <--- new field persisted
+              is_closed: isClosed,
             };
-            // -------------------------------------------------------------------
 
             dbRows.push(dbRow);
 
             await sleep(site.rate_limit_ms);
-          } catch (e) {
-            console.warn(`[scrape] detail error for ${url}:`, (e as any)?.message ?? e);
+          } catch (e: any) {
+            // If the product URL 404s, mark it closed so it stops showing up
+            const msg = String(e?.message ?? '');
+            if (/HTTP\s*404/i.test(msg)) {
+              try {
+                await supabase
+                  .from('competitions')
+                  .update({ is_closed: true })
+                  .eq('url', url);
+              } catch { /* best-effort */ }
+            }
+            console.warn(`[scrape] detail error for ${url}:`, e?.message ?? e);
             continue;
           }
         }
