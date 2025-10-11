@@ -41,6 +41,8 @@ type ApiRow = {
   odds?: number | null;              // computed/returned only
   url: string;
   scraped_at?: string;
+  // NEW:
+  ends_at?: string | null;
 };
 
 type DbRow = {
@@ -52,6 +54,8 @@ type DbRow = {
   url: string;
   scraped_at?: string;
   is_closed?: boolean | null; // NEW
+  // NEW:
+  ends_at?: string | null;
 };
 
 type AdapterRules = { adapter_key: string; rules: any };
@@ -113,6 +117,110 @@ const computeRemaining = (total?: number | null, sold?: number | null) => {
   const r = total - sold;
   return r >= 0 ? r : null;
 };
+
+/* ------------------ NEW: ends_at helpers (tiny, self-contained) ------------------ */
+const toUtcIso = (d: Date | string) => (d instanceof Date ? d : new Date(d)).toISOString();
+
+function tryParseDateUKLike(raw?: string | null): Date | null {
+  if (!raw) return null;
+  const s = raw.trim();
+
+  // If JS can parse it, use that
+  const direct = new Date(s);
+  if (!isNaN(direct.getTime())) return direct;
+
+  // dd/mm/yyyy hh:mm[:ss]
+  const m1 = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (m1) {
+    const [_, dd, mm, yyyy, hh = '0', mi = '0', ss = '0'] = m1;
+    const y = Number(yyyy.length === 2 ? '20' + yyyy : yyyy);
+    const d = new Date(Date.UTC(y, Number(mm) - 1, Number(dd), Number(hh), Number(mi), Number(ss)));
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // "11 Oct 2025 10pm" / "11 October 2025 22:00"
+  const m2 = s.match(/(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{2,4})(?:\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?/i);
+  if (m2) {
+    const [, dd, monStr, yyyy, hhRaw, minRaw, ampm] = m2;
+    const y = Number(yyyy.length === 2 ? '20' + yyyy : yyyy);
+    const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+    const mIdx = months.findIndex(m => monStr.toLowerCase().startsWith(m));
+    const hh0 = hhRaw ? Number(hhRaw) : 0; const min0 = minRaw ? Number(minRaw) : 0;
+    let hour = hh0;
+    if (ampm) {
+      const ap = ampm.toLowerCase();
+      if (ap === 'pm' && hour < 12) hour += 12;
+      if (ap === 'am' && hour === 12) hour = 0;
+    }
+    const d = new Date(Date.UTC(y, mIdx, Number(dd), hour, min0, 0));
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
+}
+
+function extractEndsAt($: CheerioAPI, rules?: any): string | null {
+  // (1) JSON-LD: availabilityEnds / priceValidUntil / validThrough / expires
+  const jsonLd = $('script[type="application/ld+json"]')
+    .map((_, el) => $(el).contents().text())
+    .get();
+  for (const raw of jsonLd) {
+    try {
+      const data = JSON.parse(raw);
+      const nodes = Array.isArray(data) ? data : [data];
+      for (const node of nodes) {
+        const graph = Array.isArray(node?.['@graph']) ? node['@graph'] : [node];
+        for (const g of graph) {
+          const offers = Array.isArray(g.offers) ? g.offers[0] : g.offers;
+          const cand = offers?.availabilityEnds || offers?.priceValidUntil || g.validThrough || g.expires;
+          if (cand) {
+            const d = tryParseDateUKLike(String(cand)) ?? new Date(String(cand));
+            if (!isNaN(d.getTime())) return toUtcIso(d);
+          }
+        }
+      }
+    } catch { /* ignore bad JSON-LD */ }
+  }
+
+  // (2) common meta tags
+  const metaKeys = [
+    'product:availability:ends','availabilityEnds','validThrough','priceValidUntil','og:availability:ends','twitter:availability:ends'
+  ];
+  for (const k of metaKeys) {
+    const v = $(`meta[property="${k}"], meta[name="${k}"]`).attr('content');
+    if (v) { const d = tryParseDateUKLike(v) ?? new Date(v); if (!isNaN(d.getTime())) return toUtcIso(d); }
+  }
+
+  // (3) common countdown data-attrs
+  const attrKeys = ['data-countdown','data-countdown-date','data-end-date','data-endtime','data-end','data-expiry','data-expire-date'];
+  for (const key of attrKeys) {
+    const v = $(`[${key}]`).first().attr(key);
+    if (v) { const d = tryParseDateUKLike(v) ?? new Date(v); if (!isNaN(d.getTime())) return toUtcIso(d); }
+  }
+
+  // (4) text fallback
+  const body = $('body').text().replace(/\s+/g,' ');
+  const reList = [
+    /(Ends(?:\s*On)?|Closes|Closing|Draw\s*Date)\s*[:\-]?\s*([A-Za-z0-9,\s:\/\-]+?\d{2,4}(?:\s*\d{1,2}:\d{2}\s*(?:am|pm)?)?)/i,
+    /(End\s*Date|Closing\s*Date)\s*[:\-]?\s*([A-Za-z0-9,\s:\/\-]+?\d{2,4}(?:\s*\d{1,2}:\d{2}\s*(?:am|pm)?)?)/i,
+  ];
+  for (const re of reList) {
+    const m = body.match(re);
+    if (m?.[2]) { const d = tryParseDateUKLike(m[2]) ?? new Date(m[2]); if (!isNaN(d.getTime())) return toUtcIso(d); }
+  }
+
+  // (5) rules-based selectors (optional)
+  const sel = rules?.ends_at_selectors as string[] | undefined;
+  if (sel?.length) {
+    for (const s of sel) {
+      const t = $(s).first().text().trim();
+      if (t) { const d = tryParseDateUKLike(t) ?? new Date(t); if (!isNaN(d.getTime())) return toUtcIso(d); }
+    }
+  }
+
+  return null;
+}
+/* ---------------- end new helpers ---------------- */
 
 // ---------- PRICE helpers ----------
 const readJsonLdProduct = ($: CheerioAPI): { name?: string; price?: number | null } => {
@@ -504,6 +612,9 @@ const buildParser = (adapter_key: string, rules?: any) => {
 
     const remaining_final = totals.remaining ?? computeRemaining(totals.total, totals.sold);
 
+    // NEW: try to extract a close/end datetime
+    const endsAt = extractEndsAt($, rules);
+
     return {
       prize,
       site_name: siteName,
@@ -512,6 +623,8 @@ const buildParser = (adapter_key: string, rules?: any) => {
       tickets_sold: totals.sold,
       remaining_tickets: remaining_final ?? undefined,
       url,
+      // NEW:
+      ends_at: endsAt ?? null,
     };
   };
 };
@@ -669,11 +782,16 @@ export async function POST(req: NextRequest) {
             // ---- compute is_closed and include in DB row ----
             const remaining_final =
               apiRow.remaining_tickets ?? computeRemaining(apiRow.total_tickets, apiRow.tickets_sold);
+
+            // NEW: time-based close if ends_at has passed
+            const timeClosed = apiRow.ends_at ? new Date(apiRow.ends_at).getTime() < Date.now() : false;
+
             const isClosed =
               (remaining_final !== null && remaining_final !== undefined && remaining_final <= 0) ||
               (apiRow.total_tickets != null &&
                apiRow.tickets_sold != null &&
-               apiRow.tickets_sold >= apiRow.total_tickets);
+               apiRow.tickets_sold >= apiRow.total_tickets) ||
+              timeClosed;
 
             const dbRow: DbRow = {
               prize: apiRow.prize,
@@ -684,6 +802,8 @@ export async function POST(req: NextRequest) {
               url: apiRow.url,
               scraped_at: apiRow.scraped_at,
               is_closed: isClosed,
+              // NEW: persist ends_at
+              ends_at: apiRow.ends_at ?? null,
             };
 
             dbRows.push(dbRow);

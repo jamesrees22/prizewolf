@@ -17,20 +17,20 @@ Use it as a living backlog. Update frequently!
 - Add **favicon** (basic wolf icon until branded assets are ready)
 - Results page: add **sort & filter** (odds ↑/↓, entry fee ↑/↓)
 - UI polish: enlarge logo, reduce spacing above search box
+- UI: Show **Remaining tickets** column in results table
+- **Scheduled full-site crawl** (daily job via Vercel Cron / Supabase Schedule)
+- Stop scrape-on-search, always query DB
 
 ---
 
 ## 🚧 Now (in progress / near term)
-- [ ] UI: Show **Remaining tickets** column in results table
 - [ ] Clean up error handling/logging in scraper route
 - [ ] Add more site adapters (e.g. 7Days Performance, Elite Competitions)
 
 ---
 
 ## ⏭ Next (planned)
-- [ ] **Scheduled full-site crawl** (daily job via Vercel Cron / Supabase Schedule)
-  - Stop scrape-on-search, always query DB
-  - Free users = daily refresh, Premium = multiple times/day
+- Free users = daily refresh, Premium = multiple times/day
 - [ ] User accounts: gate sites/features by **free vs premium tier**
 - [ ] Dashboard page as post-login landing:
   - New today, Lowest odds, Slow sellers, Ending soon
