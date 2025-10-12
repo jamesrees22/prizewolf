@@ -209,6 +209,25 @@ function extractEndsAt($: CheerioAPI, rules?: any): string | null {
     if (m?.[2]) { const d = tryParseDateUKLike(m[2]) ?? new Date(m[2]); if (!isNaN(d.getTime())) return toUtcIso(d); }
   }
 
+  // (4b) NEW: DCG-style "Drawn on the 25th of September [YYYY?]"
+  // If year is omitted, assume the next occurrence of that date in the future (default time 22:00).
+  {
+    const m = body.match(/Drawn\s+on\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([A-Za-z]{3,})(?:\s+(\d{4}))?/i);
+    if (m) {
+      const day = Number(m[1]);
+      const monStr = m[2].toLowerCase();
+      const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+      const month = months.findIndex(x => monStr.startsWith(x));
+      if (month >= 0) {
+        const now = new Date();
+        let year = m[3] ? Number(m[3]) : now.getUTCFullYear();
+        let d = new Date(Date.UTC(year, month, day, 22, 0, 0));
+        if (d.getTime() < Date.now()) d = new Date(Date.UTC(year + 1, month, day, 22, 0, 0));
+        return toUtcIso(d);
+      }
+    }
+  }
+
   // (5) rules-based selectors (optional)
   const sel = rules?.ends_at_selectors as string[] | undefined;
   if (sel?.length) {
